@@ -2,7 +2,10 @@
 
 The AWS deployment runs the official ActivityWatch v0.13.2 Linux release as a
 systemd service. The server binds only to `127.0.0.1:5600` because ActivityWatch
-does not provide authentication for its API.
+does not provide authentication for its API. Caddy publishes it over HTTPS with
+Basic Authentication at:
+
+<https://watchsynova.32-193-139-223.sslip.io>
 
 Connect from macOS with an SSH tunnel:
 
@@ -13,7 +16,8 @@ ssh -N \
   ubuntu@32.193.139.223
 ```
 
-While the tunnel is running, open <http://127.0.0.1:5600>.
+While the tunnel is running, open <http://127.0.0.1:5600>. The tunnel remains a
+fallback for administration; normal browser access uses the public HTTPS URL.
 
 Operational commands on the server:
 

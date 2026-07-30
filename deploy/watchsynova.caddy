@@ -1,0 +1,9 @@
+watchsynova.32-193-139-223.sslip.io {
+	basic_auth {
+		watchsynova $2a$14$XQx/qUSClTYcgba8iZMn9uoLB/lRGgnSeWqhUgwMWZlKLOl9Hg5IK
+	}
+
+	reverse_proxy 127.0.0.1:5600 {
+		header_up Host 127.0.0.1:5600
+	}
+}
