@@ -244,11 +244,8 @@ h3 {
 .sidebar-foot {
   margin-top: 10px;
   border-top: 1px solid #172542;
-  padding: 16px 6px 0;
-  display: grid;
-  grid-template-columns: 34px 1fr auto;
-  align-items: center;
-  gap: 10px;
+  padding-top: 12px;
+  position: relative;
 }
 .avatar {
   width: 34px;
@@ -260,25 +257,6 @@ h3 {
   color: #cdd8ee;
   font-size: 11px;
   font-weight: 600;
-}
-.sidebar-foot strong,
-.sidebar-foot span {
-  display: block;
-}
-.sidebar-foot strong {
-  font-size: 12px;
-  color: #fff;
-}
-.sidebar-foot span {
-  font-size: 9px;
-  color: #7787a6;
-  margin-top: 2px;
-}
-.sidebar-foot button {
-  background: none;
-  border: 0;
-  color: #7787a6;
-  cursor: pointer;
 }
 
 /* ---------- Workspace ---------- */
@@ -1654,39 +1632,132 @@ h3 {
   }
 }
 
-/* ---------- Sidebar collapse toggle ---------- */
+/* ---------- Sidebar collapse toggle (floating edge button) ---------- */
 .rail-toggle {
-  margin-top: auto;
-  margin-bottom: 4px;
-  border: 0;
-  background: none;
-  color: #8b9bbd;
-  padding: 10px 11px;
-  border-radius: var(--r-md);
+  position: absolute;
+  top: 68px;
+  right: -13px;
+  z-index: 6;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1px solid #26344f;
+  background: #0e1830;
+  color: #9fb0d1;
   display: grid;
-  grid-template-columns: 22px 1fr;
-  align-items: center;
-  gap: 11px;
+  place-items: center;
   cursor: pointer;
-  font-size: 12px;
-  font-weight: 500;
-  text-align: left;
-  transition: background 0.14s ease, color 0.14s ease;
+  box-shadow: 0 3px 10px #0000004d;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
 }
 .rail-toggle:hover {
-  background: #0f1a33;
-  color: #eaf0fb;
+  color: #fff;
+  border-color: #35476e;
+  background: #15213f;
 }
-.rail-toggle .nav-ico {
-  width: 22px;
-  height: 22px;
+.rail-toggle svg {
+  width: 15px;
+  height: 15px;
+  transition: transform 0.18s ease;
+}
+
+/* ---------- Sidebar user menu ---------- */
+.user-button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 34px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  background: none;
+  border: 0;
+  padding: 6px;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.14s ease;
+}
+.user-button:hover {
+  background: #0f1a33;
+}
+.user-meta {
+  min-width: 0;
+}
+.user-meta strong,
+.user-meta span {
+  display: block;
+}
+.user-meta strong {
+  font-size: 12px;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.user-meta span {
+  font-size: 9px;
+  color: #7787a6;
+  margin-top: 2px;
+}
+.user-caret {
+  color: #6d7d9c;
   display: grid;
   place-items: center;
 }
-.rail-toggle .nav-ico svg {
-  width: 18px;
-  height: 18px;
-  transition: transform 0.18s ease;
+.user-caret svg {
+  width: 15px;
+  height: 15px;
+  transition: transform 0.15s ease;
+}
+.user-button[aria-expanded="true"] .user-caret svg {
+  transform: rotate(180deg);
+}
+.menu-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+.user-menu {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  bottom: calc(100% - 6px);
+  z-index: 50;
+  background: #0f1830;
+  border: 1px solid #22304f;
+  border-radius: var(--r-md);
+  padding: 6px;
+  box-shadow: 0 14px 34px #00000073;
+}
+.user-menu button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: none;
+  border: 0;
+  color: #c3ccdd;
+  font-size: 12.5px;
+  padding: 9px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  text-align: left;
+}
+.user-menu button:hover {
+  background: #17233f;
+  color: #fff;
+}
+.user-menu button svg {
+  width: 16px;
+  height: 16px;
+  color: #8b9bbd;
+  flex: 0 0 16px;
+}
+.user-menu button.danger:hover {
+  background: #38141b;
+  color: #ff909b;
+}
+.user-menu button.danger:hover svg {
+  color: #ff909b;
 }
 
 /* ---------- Real app/site logos ---------- */
@@ -1870,23 +1941,22 @@ h3 {
   .app-shell.collapsed .sidebar nav button.active::before {
     display: none;
   }
-  .app-shell.collapsed .rail-toggle {
-    grid-template-columns: 1fr;
-    justify-items: center;
-    padding: 10px 0;
-  }
-  .app-shell.collapsed .rail-toggle .nav-label {
-    display: none;
-  }
-  .app-shell.collapsed .rail-toggle .nav-ico svg {
+  .app-shell.collapsed .rail-toggle svg {
     transform: rotate(180deg);
   }
-  .app-shell.collapsed .sidebar-foot {
+  .app-shell.collapsed .user-button {
     grid-template-columns: 1fr;
     justify-items: center;
+    padding: 6px 0;
   }
-  .app-shell.collapsed .sidebar-foot > div:last-child {
+  .app-shell.collapsed .user-meta,
+  .app-shell.collapsed .user-caret {
     display: none;
+  }
+  .app-shell.collapsed .user-menu {
+    left: 8px;
+    right: auto;
+    min-width: 212px;
   }
 }
 @media (max-width: 760px) {

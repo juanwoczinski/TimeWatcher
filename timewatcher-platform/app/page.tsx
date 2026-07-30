@@ -22,7 +22,9 @@ type IconName =
   | "reports"
   | "installers"
   | "settings"
-  | "chevron";
+  | "chevron"
+  | "logout"
+  | "caret";
 type Prefs = {
   collapsed: boolean;
   setCollapsed: (v: boolean) => void;
@@ -351,7 +353,20 @@ function Icon({ name }: { name: IconName }) {
     case "chevron":
       return (
         <svg {...p}>
-          <path d="M11 17l-5-5 5-5M18 17l-5-5 5-5" />
+          <path d="M15 18l-6-6 6-6" />
+        </svg>
+      );
+    case "logout":
+      return (
+        <svg {...p}>
+          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+          <path d="M16 17l5-5-5-5M21 12H9" />
+        </svg>
+      );
+    case "caret":
+      return (
+        <svg {...p}>
+          <path d="M6 9l6 6 6-6" />
         </svg>
       );
   }
@@ -401,6 +416,7 @@ export default function Dashboard() {
   const [density, setDensity] = useState<"comfortable" | "compact">(
     "comfortable",
   );
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   const load = useCallback(async () => {
     try {
       setError("");
@@ -458,6 +474,14 @@ export default function Dashboard() {
       } catch {}
       return nv;
     });
+  const logout = () => {
+    const { protocol, host } = window.location;
+    window.location.href = `${protocol}//loggedout:loggedout@${host}/?logout=1`;
+  };
+  const openAccount = () => {
+    setActive("Configurações");
+    setUserMenuOpen(false);
+  };
   const prefs: Prefs = {
     collapsed,
     setCollapsed,
@@ -515,21 +539,47 @@ export default function Dashboard() {
           aria-expanded={!collapsed}
           title={collapsed ? "Expandir" : "Recolher"}
         >
-          <span className="nav-ico">
-            <Icon name="chevron" />
-          </span>
-          <span className="nav-label">Recolher</span>
+          <Icon name="chevron" />
         </button>
         <div className="sidebar-foot">
-          <div className="avatar">{initials}</div>
-          <div>
-            <strong>{data?.viewer.name || "TeamWatcher"}</strong>
-            <span>
-              {data?.viewer.role === "super_admin"
-                ? "Super admin Synova"
-                : "Admin da organização"}
+          <button
+            className="user-button"
+            onClick={() => setUserMenuOpen((v) => !v)}
+            aria-haspopup="menu"
+            aria-expanded={userMenuOpen}
+            title={data?.viewer.name || "Conta"}
+          >
+            <div className="avatar">{initials}</div>
+            <div className="user-meta">
+              <strong>{data?.viewer.name || "TeamWatcher"}</strong>
+              <span>
+                {data?.viewer.role === "super_admin"
+                  ? "Super admin Synova"
+                  : "Admin da organização"}
+              </span>
+            </div>
+            <span className="user-caret">
+              <Icon name="caret" />
             </span>
-          </div>
+          </button>
+          {userMenuOpen && (
+            <>
+              <div
+                className="menu-overlay"
+                onClick={() => setUserMenuOpen(false)}
+              />
+              <div className="user-menu" role="menu">
+                <button role="menuitem" onClick={openAccount}>
+                  <Icon name="settings" />
+                  Configurações da conta
+                </button>
+                <button role="menuitem" className="danger" onClick={logout}>
+                  <Icon name="logout" />
+                  Sair
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </aside>
       <section className="workspace">
