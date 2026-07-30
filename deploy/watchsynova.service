@@ -1,0 +1,21 @@
+[Unit]
+Description=WatchSynova ActivityWatch server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=activitywatch
+Group=activitywatch
+Environment=HOME=/var/lib/activitywatch
+ExecStart=/opt/watchsynova/activitywatch/aw-server/aw-server --host 127.0.0.1 --port 5600
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/activitywatch
+
+[Install]
+WantedBy=multi-user.target
