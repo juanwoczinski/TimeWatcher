@@ -1,89 +1,101 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
-const nav = ["Visão geral", "Pessoas", "Dispositivos", "Capturas", "Instaladores", "Configurações"];
-const initials: Record<string, string> = { "Visão geral": "◫", Pessoas: "P", Dispositivos: "D", Capturas: "C", Instaladores: "↓", Configurações: "⚙" };
-const people = [
-  { name: "Ana Martins", team: "Produto", device: "ANA-MBP-14", status: "Online", focus: "6h 42m", score: 91 },
-  { name: "Carlos Nunes", team: "Engenharia", device: "CARLOS-WIN", status: "Online", focus: "7h 08m", score: 94 },
-  { name: "Julia Costa", team: "Operações", device: "JULIA-MBP", status: "Pausa", focus: "5h 51m", score: 83 },
-  { name: "Rafael Souza", team: "Comercial", device: "RAFAEL-WIN", status: "Offline", focus: "4h 37m", score: 76 },
-];
+type Period = "today" | "7d" | "30d";
+type SectionName = "Visão geral" | "Pessoas" | "Dispositivos" | "Atividades" | "Capturas" | "Instaladores" | "Configurações";
+type Device = { id:string; name:string; platform:string; lastSeen:string; status:"online"|"offline"; trackedSeconds:number; activeSeconds:number; presses:number; clicks:number };
+type AppUsage = { name:string; seconds:number; duration:string; classification:"productive"|"neutral"|"unproductive"; share:number };
+type DashboardData = {
+  tenant:{id:string;name:string}; period:Period; generatedAt:string;
+  person:{id:string;name:string;role:string;deviceCount:number;status:"online"|"offline";trackedSeconds:number;activeSeconds:number;idleSeconds:number;productiveSeconds:number;focusScore:number};
+  summary:{trackedSeconds:number;activeSeconds:number;idleSeconds:number;productiveSeconds:number;neutralSeconds:number;unproductiveSeconds:number;focusScore:number;deviceCount:number;onlineDeviceCount:number;screenshotCount:number;lastSeen:string|null};
+  devices:Device[]; apps:AppUsage[]; timeline:{hour:number;label:string;seconds:number}[];
+  recent:{timestamp:string;duration:number;app:string;title:string}[]; input:{presses:number;clicks:number};
+};
+type Screenshot = {id:string;capturedAt:string;size:number;url:string;app?:string;title?:string;device?:string};
 
-const captures = [
-  { user: "Ana Martins", app: "Figma", time: "há 2 min", tone: "cyan" },
-  { user: "Carlos Nunes", app: "Visual Studio Code", time: "há 4 min", tone: "violet" },
-  { user: "Julia Costa", app: "Google Chrome", time: "há 6 min", tone: "amber" },
-  { user: "Rafael Souza", app: "HubSpot", time: "há 11 min", tone: "blue" },
+const nav: {name:SectionName; icon:string}[] = [
+  {name:"Visão geral",icon:"◫"},{name:"Pessoas",icon:"P"},{name:"Dispositivos",icon:"D"},
+  {name:"Atividades",icon:"A"},{name:"Capturas",icon:"C"},{name:"Instaladores",icon:"↓"},{name:"Configurações",icon:"⚙"},
 ];
+const periodLabels:Record<Period,string> = {today:"Hoje","7d":"Últimos 7 dias","30d":"Últimos 30 dias"};
+const classLabels = {productive:"Produtivo",neutral:"Neutro",unproductive:"Não produtivo"};
+
+function duration(seconds:number) {
+  const total=Math.max(0,Math.round(seconds)); const h=Math.floor(total/3600); const m=Math.floor((total%3600)/60); const s=total%60;
+  return h ? `${h}h ${String(m).padStart(2,"0")}m` : `${m}m ${String(s).padStart(2,"0")}s`;
+}
+function localDate(value:string|null) { return value ? new Date(value).toLocaleString("pt-BR",{dateStyle:"short",timeStyle:"short"}) : "Sem sincronização"; }
 
 export default function Dashboard() {
-  const [active, setActive] = useState("Visão geral");
-  const [tenant, setTenant] = useState("Synova Tecnologia");
-  const [range, setRange] = useState("Hoje");
-  const online = useMemo(() => people.filter((p) => p.status === "Online").length, []);
-
-  return (
-    <main className="app-shell">
-      <aside className="sidebar">
-        <div className="brand"><img src="/timewatcher-logo.png" alt="" /><div><strong>TimeWatcher</strong><span>Work intelligence</span></div></div>
-        <div className="tenant-picker"><span className="tenant-mark">S</span><select value={tenant} onChange={(e) => setTenant(e.target.value)} aria-label="Empresa"><option>Synova Tecnologia</option><option>Orbe Logística</option><option>Norte Labs</option></select><small>Plano Business</small></div>
-        <nav aria-label="Navegação principal">{nav.map((item) => <button key={item} className={active === item ? "active" : ""} onClick={() => setActive(item)}><span>{initials[item]}</span>{item}{item === "Dispositivos" && <b>12</b>}</button>)}</nav>
-        <div className="sidebar-foot"><div className="avatar">JK</div><div><strong>Juan Kleber</strong><span>Admin da plataforma</span></div><button aria-label="Menu da conta">•••</button></div>
-      </aside>
-
-      <section className="workspace">
-        <header><div><p className="eyebrow">{tenant} · {active}</p><h1>{active}</h1><p>{active === "Visão geral" ? "Acompanhe a operação sem perder o contexto humano." : `Gerencie ${active.toLowerCase()} com isolamento por empresa.`}</p></div><div className="header-actions"><button className="icon-button" aria-label="Notificações">●<i /></button><button className="primary">+ Adicionar colaborador</button></div></header>
-        {active === "Visão geral" ? <Overview online={online} range={range} setRange={setRange} /> : <Section active={active} />}
-      </section>
-    </main>
-  );
+  const [active,setActive]=useState<SectionName>("Visão geral");
+  const [period,setPeriod]=useState<Period>("today");
+  const [data,setData]=useState<DashboardData|null>(null);
+  const [error,setError]=useState("");
+  const [loading,setLoading]=useState(true);
+  const load=useCallback(async()=>{
+    try { setError(""); const response=await fetch(`/platform-api/dashboard/data?period=${period}`,{credentials:"same-origin",cache:"no-store"}); if(!response.ok) throw new Error(); setData(await response.json()); }
+    catch { setError("Não foi possível carregar os dados enviados pelo agente."); }
+    finally { setLoading(false); }
+  },[period]);
+  useEffect(()=>{ setLoading(true); load(); const timer=setInterval(load,30000); return()=>clearInterval(timer); },[load]);
+  const tenant=data?.tenant.name || "TimeWatcher";
+  return <main className="app-shell">
+    <aside className="sidebar">
+      <div className="brand"><img src="/timewatcher-logo.png" alt=""/><div><strong>TimeWatcher</strong><span>Inteligência do tempo</span></div></div>
+      <div className="tenant-picker"><span className="tenant-mark">{tenant[0]}</span><div><strong>{tenant}</strong><small>Ambiente da empresa</small></div></div>
+      <nav aria-label="Navegação principal">{nav.map(item=><button key={item.name} className={active===item.name?"active":""} onClick={()=>setActive(item.name)}><span>{item.icon}</span>{item.name}{item.name==="Dispositivos"&&<b>{data?.summary.deviceCount??"—"}</b>}</button>)}</nav>
+      <div className="sidebar-foot"><div className="avatar">JK</div><div><strong>{data?.person.name||"Juan Kleber"}</strong><span>Admin da plataforma</span></div></div>
+    </aside>
+    <section className="workspace">
+      <header><div><p className="eyebrow">{tenant} · {active}</p><h1>{active}</h1><p>{subtitle(active)}</p></div><div className="header-actions"><button className="refresh-button" onClick={load}>↻ Atualizar</button></div></header>
+      <div className="toolbar"><div className={`live ${data?.summary.onlineDeviceCount?"":"offline"}`}><i/> {data?.summary.onlineDeviceCount?"Agente conectado":"Agente sem sincronização recente"}{data?.summary.lastSeen&&` · ${localDate(data.summary.lastSeen)}`}</div><select value={period} onChange={e=>setPeriod(e.target.value as Period)} aria-label="Período"><option value="today">Hoje</option><option value="7d">Últimos 7 dias</option><option value="30d">Últimos 30 dias</option></select></div>
+      {loading&&!data?<StateCard text="Carregando dados reais da sua máquina…"/>:error&&!data?<StateCard text={error}/>:data&&<Content active={active} data={data} onNavigate={setActive}/>}
+    </section>
+  </main>;
 }
 
-function Overview({ online, range, setRange }: { online: number; range: string; setRange: (v: string) => void }) {
+function subtitle(active:SectionName){ const map:Record<SectionName,string>={"Visão geral":"Entenda como o tempo está sendo usado, com dados enviados pelo agente.",Pessoas:"Tempo e atividade por colaborador, sem informações financeiras.",Dispositivos:"Inventário e saúde dos computadores que enviam dados.",Atividades:"Aplicativos, janelas, períodos ativos e ociosidade.",Capturas:"Capturas periódicas autorizadas pelo usuário.",Instaladores:"Distribuição do agente por sistema operacional.",Configurações:"Políticas de coleta, classificação e privacidade."}; return map[active]; }
+function StateCard({text}:{text:string}){return <div className="state-card">{text}</div>}
+function Content({active,data,onNavigate}:{active:SectionName;data:DashboardData;onNavigate:(v:SectionName)=>void}){
+  if(active==="Visão geral") return <Overview data={data} onNavigate={onNavigate}/>;
+  if(active==="Pessoas") return <People data={data}/>;
+  if(active==="Dispositivos") return <Devices data={data}/>;
+  if(active==="Atividades") return <Activities data={data}/>;
+  if(active==="Capturas") return <ScreenshotGallery/>;
+  if(active==="Instaladores") return <Installers data={data}/>;
+  return <Settings data={data}/>;
+}
+
+function Overview({data,onNavigate}:{data:DashboardData;onNavigate:(v:SectionName)=>void}){
+  const s=data.summary; const total=s.productiveSeconds+s.neutralSeconds+s.unproductiveSeconds||1;
+  const top=data.apps.slice(0,5); const max=Math.max(...data.timeline.map(x=>x.seconds),1);
   return <>
-    <div className="toolbar"><div className="live"><i /> Dados atualizados agora</div><select value={range} onChange={(e) => setRange(e.target.value)} aria-label="Período"><option>Hoje</option><option>Últimos 7 dias</option><option>Últimos 30 dias</option></select></div>
     <div className="metrics">
-      <Metric label="Colaboradores ativos" value="11" note={`${online} online agora`} trend="+8%" />
-      <Metric label="Tempo produtivo" value="68h 24m" note="média de 6h 13m" trend="+12%" />
-      <Metric label="Foco médio" value="87%" note="acima da meta de 80%" trend="+4,2%" />
-      <Metric label="Dispositivos" value="12" note="11 protegidos · 1 atenção" trend="92%" />
+      <Metric label="Tempo monitorado" value={duration(s.trackedSeconds)} note={periodLabels[data.period]} />
+      <Metric label="Tempo ativo" value={duration(s.activeSeconds)} note={`${duration(s.idleSeconds)} em ociosidade`} />
+      <Metric label="Tempo produtivo" value={duration(s.productiveSeconds)} note={`${s.focusScore}% do tempo monitorado`} />
+      <Metric label="Dispositivos" value={String(s.deviceCount)} note={`${s.onlineDeviceCount} conectado agora`} />
     </div>
     <div className="grid-main">
-      <article className="card activity"><div className="card-head"><div><h2>Atividade ao longo do dia</h2><p>Tempo ativo, foco e pausas da equipe</p></div><div className="legend"><span className="focus">Foco</span><span className="active-time">Ativo</span><span className="away">Pausa</span></div></div><div className="chart"><div className="y-labels"><span>100%</span><span>75%</span><span>50%</span><span>25%</span><span>0%</span></div><div className="plot"><div className="grid-lines"><i/><i/><i/><i/><i/></div><div className="area area-a"/><div className="area area-b"/><div className="chart-labels"><span>08h</span><span>10h</span><span>12h</span><span>14h</span><span>16h</span><span>18h</span></div></div></div></article>
-      <article className="card distribution"><div className="card-head"><div><h2>Distribuição do tempo</h2><p>Classificação automática</p></div><button>•••</button></div><div className="donut-wrap"><div className="donut"><div><strong>87%</strong><span>produtivo</span></div></div><ul><li><i className="c1"/><span>Produtivo</span><strong>68h 24m</strong></li><li><i className="c2"/><span>Neutro</span><strong>7h 18m</strong></li><li><i className="c3"/><span>Não produtivo</span><strong>3h 02m</strong></li></ul></div></article>
+      <article className="card activity"><div className="card-head"><div><h2>Atividade ao longo do período</h2><p>Tempo monitorado por hora</p></div></div><div className="bar-chart">{data.timeline.length?data.timeline.map(item=><div className="bar-column" key={item.hour}><span style={{height:`${Math.max(5,item.seconds/max*100)}%`}} title={duration(item.seconds)}/><small>{item.label}</small></div>):<StateCard text="Ainda não há atividade neste período."/>}</div></article>
+      <article className="card distribution"><div className="card-head"><div><h2>Distribuição do tempo</h2><p>Classificação dos aplicativos</p></div></div><div className="donut-wrap"><div className="donut real" style={{background:`conic-gradient(var(--violet) 0 ${s.productiveSeconds/total*100}%,var(--cyan) ${s.productiveSeconds/total*100}% ${(s.productiveSeconds+s.neutralSeconds)/total*100}%,#e3e7ef ${(s.productiveSeconds+s.neutralSeconds)/total*100}% 100%)`}}><div><strong>{s.focusScore}%</strong><span>produtivo</span></div></div><ul><li><i className="c1"/><span>Produtivo</span><strong>{duration(s.productiveSeconds)}</strong></li><li><i className="c2"/><span>Neutro</span><strong>{duration(s.neutralSeconds)}</strong></li><li><i className="c3"/><span>Não produtivo</span><strong>{duration(s.unproductiveSeconds)}</strong></li></ul></div></article>
     </div>
     <div className="grid-bottom">
-      <article className="card team"><div className="card-head"><div><h2>Equipe hoje</h2><p>Presença e desempenho por colaborador</p></div><button className="text-button">Ver todos →</button></div><div className="table"><div className="row table-head"><span>Colaborador</span><span>Status</span><span>Tempo em foco</span><span>Índice</span></div>{people.map((p) => <div className="row" key={p.name}><span className="person"><i>{p.name.split(" ").map(n=>n[0]).join("")}</i><span><strong>{p.name}</strong><small>{p.team} · {p.device}</small></span></span><span><em className={`status ${p.status.toLowerCase()}`}>{p.status}</em></span><span>{p.focus}</span><span className="score"><b style={{width:`${p.score}%`}}/><strong>{p.score}</strong></span></div>)}</div></article>
-      <article className="card recent"><div className="card-head"><div><h2>Capturas recentes</h2><p>Visíveis conforme a política da empresa</p></div><button className="text-button">Galeria →</button></div><div className="capture-grid">{captures.map((c) => <div className={`capture ${c.tone}`} key={c.user}><div className="fake-screen"><span>{c.app.slice(0,2).toUpperCase()}</span><i/><i/><i/></div><div><strong>{c.user}</strong><span>{c.app} · {c.time}</span></div></div>)}</div></article>
+      <article className="card"><div className="card-head"><div><h2>Aplicativos mais usados</h2><p>Dados reais do dispositivo</p></div><button className="text-button" onClick={()=>onNavigate("Atividades")}>Ver todos →</button></div><AppTable apps={top}/></article>
+      <article className="card"><div className="card-head"><div><h2>Sua máquina</h2><p>Último estado recebido</p></div><button className="text-button" onClick={()=>onNavigate("Dispositivos")}>Detalhes →</button></div>{data.devices.map(device=><DeviceCard device={device} key={device.id}/>)}</article>
     </div>
   </>;
 }
+function Metric({label,value,note}:{label:string;value:string;note:string}){return <article className="metric"><div><span>{label}</span><strong>{value}</strong><small>{note}</small></div></article>}
 
-function Metric({ label, value, note, trend }: { label: string; value: string; note: string; trend: string }) { return <article className="metric"><div><span>{label}</span><strong>{value}</strong><small>{note}</small></div><b>{trend}</b></article>; }
+function People({data}:{data:DashboardData}){const p=data.person;return <div className="page-stack"><article className="card data-card"><div className="card-head"><div><h2>Colaboradores monitorados</h2><p>Registros vinculados a esta empresa</p></div><span className={`pill ${p.status}`}>{p.status==="online"?"Online":"Offline"}</span></div><div className="person-detail"><div className="avatar large">JK</div><div><h3>{p.name}</h3><p>{p.role} · {p.deviceCount} dispositivo</p></div><dl><div><dt>Monitorado</dt><dd>{duration(p.trackedSeconds)}</dd></div><div><dt>Ativo</dt><dd>{duration(p.activeSeconds)}</dd></div><div><dt>Ocioso</dt><dd>{duration(p.idleSeconds)}</dd></div><div><dt>Produtivo</dt><dd>{duration(p.productiveSeconds)}</dd></div></dl></div></article><article className="card"><h2>Aplicativos do colaborador</h2><AppTable apps={data.apps}/></article></div>}
+function Devices({data}:{data:DashboardData}){return <div className="page-stack"><div className="section-summary"><strong>{data.devices.length} dispositivo encontrado</strong><span>Inventário criado automaticamente pelos dados do agente</span></div><div className="device-grid">{data.devices.map(device=><DeviceCard device={device} key={device.id}/>)}</div></div>}
+function DeviceCard({device}:{device:Device}){return <article className="device-card"><div className="device-icon">⌘</div><div><h3>{device.name}</h3><p>{device.platform} · {device.id}</p></div><span className={`pill ${device.status}`}>{device.status==="online"?"Conectado":"Offline"}</span><dl><div><dt>Última sincronização</dt><dd>{localDate(device.lastSeen)}</dd></div><div><dt>Tempo monitorado</dt><dd>{duration(device.trackedSeconds)}</dd></div><div><dt>Teclas</dt><dd>{device.presses.toLocaleString("pt-BR")}</dd></div><div><dt>Cliques</dt><dd>{device.clicks.toLocaleString("pt-BR")}</dd></div></dl></article>}
+function Activities({data}:{data:DashboardData}){return <div className="page-stack"><div className="metrics compact"><Metric label="Tempo monitorado" value={duration(data.summary.trackedSeconds)} note={periodLabels[data.period]}/><Metric label="Ativo" value={duration(data.summary.activeSeconds)} note="Uso com atividade"/><Metric label="Ocioso" value={duration(data.summary.idleSeconds)} note="Sem interação"/><Metric label="Aplicativos" value={String(data.apps.length)} note="Detectados no período"/></div><article className="card"><div className="card-head"><div><h2>Uso por aplicativo</h2><p>Classificação baseada nas regras atuais</p></div></div><AppTable apps={data.apps}/></article><article className="card"><h2>Atividade recente</h2><div className="recent-list">{data.recent.map((item,index)=><div key={`${item.timestamp}-${index}`}><span className="app-dot"/><div><strong>{item.app}</strong><small>{item.title||"Sem título de janela"}</small></div><time>{duration(item.duration)} · {localDate(item.timestamp)}</time></div>)}</div></article></div>}
+function AppTable({apps}:{apps:AppUsage[]}){return <div className="app-table"><div className="app-row head"><span>Aplicativo</span><span>Classificação</span><span>Tempo</span><span>Participação</span></div>{apps.length?apps.map(app=><div className="app-row" key={app.name}><span><i>{app.name.slice(0,2).toUpperCase()}</i><strong>{app.name}</strong></span><span><em className={`classification ${app.classification}`}>{classLabels[app.classification]}</em></span><span>{app.duration}</span><span className="share"><b style={{width:`${app.share}%`}}/>{app.share}%</span></div>):<StateCard text="Nenhum aplicativo no período selecionado."/>}</div>}
 
-function Section({ active }: { active: string }) {
-  if (active === "Capturas") return <ScreenshotGallery />;
-  const configs: Record<string, { title: string; text: string; action: string }[]> = {
-    Pessoas: [{title:"Colaboradores",text:"Perfis, equipes, cargos e políticas atribuídas.",action:"Gerenciar pessoas"},{title:"Papéis e acesso",text:"Admin da plataforma, admin da empresa, gestor e colaborador.",action:"Configurar papéis"},{title:"Convites pendentes",text:"3 convites aguardando primeiro acesso.",action:"Reenviar convites"}],
-    Dispositivos: [{title:"12 dispositivos",text:"11 saudáveis e 1 dispositivo sem sincronizar há 2 horas.",action:"Abrir inventário"},{title:"Políticas",text:"Capture tela a cada 60 minutos, apps e tempo de inatividade.",action:"Editar política"},{title:"Ativos",text:"Atribua notebook, desktop e estação a um colaborador.",action:"Atribuir ativo"}],
-    Capturas: [{title:"Galeria protegida",text:"Capturas segmentadas por empresa, colaborador e dispositivo.",action:"Abrir galeria"},{title:"Retenção",text:"30 dias com exclusão automática e trilha de auditoria.",action:"Configurar retenção"},{title:"Privacidade",text:"Mascaramento, pausa do colaborador e horários permitidos.",action:"Revisar regras"}],
-    Instaladores: [{title:"macOS Apple Silicon",text:"Pacote .pkg assinado e pré-configurado para esta empresa.",action:"Baixar .pkg"},{title:"Windows 64-bit",text:"MSI silencioso para Intune, GPO, RMM ou instalação manual.",action:"Baixar .msi"},{title:"Token de provisionamento",text:"Expira em 24h e vincula novos dispositivos à empresa correta.",action:"Gerar novo token"}],
-    Configurações: [{title:"Empresa",text:"Marca, domínio, fuso horário e política de dados.",action:"Editar empresa"},{title:"Segurança",text:"MFA, sessões, chaves de API e auditoria administrativa.",action:"Abrir segurança"},{title:"Integrações",text:"Webhooks, exportação e diretórios corporativos.",action:"Ver integrações"}],
-  };
-  return <div className="section-grid">{configs[active]?.map((item) => <article className="feature-card" key={item.title}><div className="feature-icon">{initials[active]}</div><h2>{item.title}</h2><p>{item.text}</p><button>{item.action} →</button></article>)}</div>;
-}
-
-function ScreenshotGallery() {
-  const [items, setItems] = useState<{id:string;capturedAt:string;size:number;url:string}[]>([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    fetch("/platform-api/dashboard/screenshots", { credentials: "same-origin" })
-      .then((r) => r.ok ? r.json() : Promise.reject())
-      .then((data) => setItems(data.items || []))
-      .catch(() => setItems([]))
-      .finally(() => setLoading(false));
-  }, []);
-  return <div className="gallery-page"><div className="gallery-toolbar"><div><strong>{items.length || "—"} capturas recentes</strong><span>Protegidas, auditáveis e segmentadas por empresa</span></div><button>Política de captura</button></div>{loading ? <div className="gallery-empty">Carregando capturas protegidas…</div> : items.length ? <div className="real-gallery">{items.map((item) => <article key={item.id}><img src={item.url} alt={`Captura ${item.id}`} loading="lazy"/><div><strong>MacBook Pro de Juan</strong><span>{new Date(item.capturedAt).toLocaleString("pt-BR")} · {(item.size/1024).toFixed(0)} KB</span></div></article>)}</div> : <div className="gallery-empty"><strong>Nenhuma captura disponível neste ambiente.</strong><span>Na AWS, as capturas aparecem aqui após o primeiro ciclo do agente.</span></div>}</div>;
-}
+function ScreenshotGallery(){const[items,setItems]=useState<Screenshot[]>([]);const[loading,setLoading]=useState(true);useEffect(()=>{fetch("/platform-api/dashboard/screenshots",{credentials:"same-origin",cache:"no-store"}).then(r=>r.ok?r.json():Promise.reject()).then(d=>setItems(d.items||[])).catch(()=>setItems([])).finally(()=>setLoading(false))},[]);return <div className="gallery-page"><div className="gallery-toolbar"><div><strong>{items.length} capturas recebidas</strong><span>Clique em uma imagem para ampliar</span></div></div>{loading?<StateCard text="Carregando capturas…"/>:items.length?<div className="real-gallery">{items.map(item=><a href={item.url} target="_blank" rel="noreferrer" key={item.id}><article><img src={item.url} alt={`Captura de ${item.app||"atividade"}`} loading="lazy"/><div><strong>{item.app||"Aplicativo não identificado"}</strong><span>{item.device?.replace(".local","")||"MacBook Pro de Juan"}</span><span>{localDate(item.capturedAt)} · {(item.size/1024).toFixed(0)} KB</span></div></article></a>)}</div>:<StateCard text="Nenhuma captura recebida. Verifique a permissão de Gravação da Tela no macOS."/>}</div>}
+function Installers({data}:{data:DashboardData}){return <div className="install-grid"><article className="install-card ready"><span>macOS</span><h2>Agente em execução</h2><p>{data.devices[0]?.name||"Nenhum Mac conectado"}</p><strong>{data.devices[0]?.status==="online"?"Coletando dados agora":"Última sincronização: "+localDate(data.summary.lastSeen)}</strong></article><article className="install-card"><span>PKG</span><h2>Instalador corporativo macOS</h2><p>Empacotamento e assinatura Developer ID fazem parte da próxima entrega.</p><button disabled>Em preparação</button></article><article className="install-card"><span>MSI</span><h2>Instalação em massa Windows</h2><p>Será distribuído por Intune, GPO ou RMM com token da empresa.</p><button disabled>Em preparação</button></article></div>}
+function Settings({data}:{data:DashboardData}){return <div className="settings-grid"><article className="card"><h2>Coleta atual</h2><dl className="settings-list"><div><dt>Empresa</dt><dd>{data.tenant.name}</dd></div><div><dt>Aplicativos e janelas</dt><dd>Ativo</dd></div><div><dt>Atividade/ociosidade</dt><dd>Ativo</dd></div><div><dt>Teclado e mouse</dt><dd>Somente contagens</dd></div><div><dt>Capturas</dt><dd>Periódicas e autorizadas</dd></div></dl></article><article className="card"><h2>Classificação inicial</h2><p className="settings-copy">ChatGPT, Codex, Terminal, VS Code, Xcode, Figma, Notion, Slack, Zoom e Meet são produtivos. Redes sociais e entretenimento são não produtivos. Os demais começam como neutros.</p></article><article className="card"><h2>Privacidade</h2><p className="settings-copy">Não coletamos conteúdo digitado. A plataforma recebe contagens de interação, aplicativos, títulos de janela, tempo e capturas autorizadas. Retenção e acesso por perfil serão configuráveis.</p></article></div>}

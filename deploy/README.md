@@ -26,6 +26,15 @@ sudo systemctl status watchsynova
 sudo journalctl -u watchsynova -f
 ```
 
+Deploy completo e repetível, sem depender de IA:
+
+```sh
+./deploy/deploy-timewatcher.sh
+```
+
+Para outro host ou chave, defina `TIMEWATCHER_HOST` e
+`TIMEWATCHER_SSH_KEY` antes de executar o script.
+
 Persistent ActivityWatch data is owned by the dedicated `activitywatch` system
 user under `/var/lib/activitywatch`. Application files live under
 `/opt/watchsynova`.
