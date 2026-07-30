@@ -15,7 +15,9 @@ timewatcher.32-193-139-223.sslip.io {
 				timewatcher2 $2a$14$CEb.lIU55mNBn.IawRx1suE9oFL.j6sSfTMt7Tr4SchzM9hQvnJpq
 			}
 			uri strip_prefix /platform-api
-			reverse_proxy 127.0.0.1:5610
+			reverse_proxy 127.0.0.1:5610 {
+				header_up X-TimeWatcher-User {http.auth.user.id}
+			}
 		}
 
 		handle {

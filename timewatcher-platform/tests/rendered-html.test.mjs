@@ -22,6 +22,7 @@ test("server-renders the TimeWatcher product shell", async () => {
   assert.match(html, /Pessoas/);
   assert.match(html, /Dispositivos/);
   assert.match(html, /Atividades/);
+  assert.match(html, /Relatórios/);
   assert.doesNotMatch(html, />Capturas<\/button>/);
   assert.match(html, /Carregando dados reais da sua máquina/);
   assert.doesNotMatch(html, /Ana Martins|Carlos Nunes|Orbe Logística|Norte Labs/);
@@ -34,9 +35,10 @@ test("loads operational data from the protected platform API", async () => {
   ]);
   assert.match(page, /platform-api\/dashboard\/data/);
   assert.match(page, /platform-api\/dashboard\/screenshots/);
-  assert.match(page, /Capturas de \$\{p\.name\}/);
-  assert.match(page, /Capturas do dispositivo \$\{device\.name\}/);
-  assert.match(page, /setInterval\(load,30000\)/);
+  assert.match(page, /platform-api\/dashboard\/export\.csv/);
+  assert.match(page, /platform-api\/dashboard\/people\/schedule/);
+  assert.match(page, /URLs e sites acessados/);
+  assert.match(page, /setInterval\(load,\s*30000\)/);
   assert.doesNotMatch(page, /const people\s*=|const captures\s*=/);
   assert.match(layout, /title:\s*"TimeWatcher — Work Intelligence"/);
 });

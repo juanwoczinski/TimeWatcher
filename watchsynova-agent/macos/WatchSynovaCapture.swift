@@ -4,7 +4,8 @@ import CoreGraphics
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let agentPath = NSString(string: "~/Library/Application Support/WatchSynova/watchsynova_screenshot_agent.py").expandingTildeInPath
-    private let activityWatchBin = NSString(string: "~/Applications/ActivityWatch.app/Contents/MacOS").expandingTildeInPath
+    private let activityWatchBin = "/Applications/ActivityWatch.app/Contents/MacOS"
+    private let configPath = NSString(string: "~/Library/Application Support/WatchSynova/screenshot-agent.json").expandingTildeInPath
     private var timer: Timer?
     private var statusItem: NSStatusItem?
     private var modules: [Process] = []
@@ -16,8 +17,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         configureStatusItem()
+        guard ensureEnrollment() else {
+            setStatus("Ativação pendente — abra novamente")
+            return
+        }
         startCoreModules()
         requestPermissionAndStart()
+    }
+
+    private func ensureEnrollment() -> Bool {
+        if FileManager.default.fileExists(atPath: configPath),
+           let data = FileManager.default.contents(atPath: configPath),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let token = object["token"] as? String, !token.isEmpty { return true }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Ativar TimeWatcher"
+        alert.informativeText = "Cole o código de ativação fornecido pelo administrador da sua empresa."
+        alert.addButton(withTitle: "Ativar")
+        alert.addButton(withTitle: "Cancelar")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        field.placeholderString = "Código de ativação"
+        alert.accessoryView = field
+        guard alert.runModal() == .alertFirstButtonReturn, !field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        let directory = URL(fileURLWithPath: configPath).deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let config: [String: Any] = ["server_url": "https://timewatcher.32-193-139-223.sslip.io", "token": field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), "consent": true, "interval_seconds": 60]
+        guard let data = try? JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted]), (try? data.write(to: URL(fileURLWithPath: configPath), options: .atomic)) != nil else { return false }
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configPath)
+        return true
     }
 
     private func configureStatusItem() {

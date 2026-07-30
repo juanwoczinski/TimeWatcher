@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+logged_user="$(stat -f '%Su' /dev/console)"
+user_dir="/Users/$logged_user/Library/Application Support/WatchSynova"
+install -d -o "$logged_user" -g staff "$user_dir"
+install -m 0755 -o "$logged_user" -g staff "/Library/Application Support/TimeWatcher/watchsynova_screenshot_agent.py" "$user_dir/watchsynova_screenshot_agent.py"
+open -a /Applications/TimeWatcher.app || true
+exit 0

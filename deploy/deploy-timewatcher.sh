@@ -37,6 +37,7 @@ sudo chown -R timewatcher-platform:timewatcher-platform /opt/timewatcher-platfor
 cd /opt/timewatcher-platform
 sudo -u timewatcher-platform npm install
 sudo -u timewatcher-platform npm run build
+sudo install -d -o timewatcher-platform -g timewatcher-platform /opt/timewatcher-platform/public/downloads
 
 echo "[3/5] Atualizando API e serviços"
 sudo install -m 0755 '$REMOTE_STAGE/config/ingest_server.py' /opt/watchsynova-agent/ingest_server.py

@@ -17,8 +17,44 @@ QUEUE = Path.home() / "Library/Application Support/WatchSynova/screenshot-queue"
 SYNC_STATE = Path.home() / "Library/Application Support/WatchSynova/sync-state.json"
 
 
-def active_window() -> tuple[str, str]:
+def browser_url(app: str) -> str:
+    scripts = {
+        "Google Chrome": 'tell application "Google Chrome" to get URL of active tab of front window',
+        "Microsoft Edge": 'tell application "Microsoft Edge" to get URL of active tab of front window',
+        "Brave Browser": 'tell application "Brave Browser" to get URL of active tab of front window',
+        "Safari": 'tell application "Safari" to get URL of current tab of front window',
+    }
+    if app not in scripts:
+        return ""
+
+
+def browser_title(app: str) -> str:
+    scripts = {
+        "Google Chrome": 'tell application "Google Chrome" to get title of active tab of front window',
+        "Microsoft Edge": 'tell application "Microsoft Edge" to get title of active tab of front window',
+        "Brave Browser": 'tell application "Brave Browser" to get title of active tab of front window',
+        "Safari": 'tell application "Safari" to get name of current tab of front window',
+    }
+    if app not in scripts:
+        return ""
     try:
+        result = subprocess.run(["/usr/bin/osascript", "-e", scripts[app]], capture_output=True, text=True, timeout=3)
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    try:
+        result = subprocess.run(["/usr/bin/osascript", "-e", scripts[app]], capture_output=True, text=True, timeout=3)
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def active_window() -> tuple[str, str, str]:
+    try:
+        frontmost = subprocess.run(
+            ["/usr/bin/osascript", "-e", 'tell application "System Events" to get name of first application process whose frontmost is true'],
+            capture_output=True, text=True, timeout=3,
+        ).stdout.strip()
         with urllib.request.urlopen("http://127.0.0.1:5600/api/0/buckets/", timeout=3) as response:
             buckets = json.load(response)
         bucket = next(key for key in buckets if key.startswith("aw-watcher-window_"))
@@ -26,13 +62,15 @@ def active_window() -> tuple[str, str]:
         with urllib.request.urlopen(url, timeout=3) as response:
             events = json.load(response)
         data = events[0].get("data", {}) if events else {}
-        return str(data.get("app", "")), str(data.get("title", ""))
+        app = frontmost or str(data.get("app", ""))
+        url = browser_url(app)
+        return app, (browser_title(app) if url else str(data.get("title", ""))), url
     except Exception:
-        return "", ""
+        return "", "", ""
 
 
 def upload(path: Path, config: dict) -> bool:
-    app, title = active_window()
+    app, title, url = active_window()
     request = urllib.request.Request(
         config["server_url"].rstrip("/") + "/ingest/v1/screenshots",
         data=path.read_bytes(), method="POST",
@@ -43,6 +81,7 @@ def upload(path: Path, config: dict) -> bool:
             "X-Captured-At": datetime.now(timezone.utc).isoformat(),
             "X-Active-App": app,
             "X-Active-Title": title,
+            "X-Active-URL": url,
         },
     )
     try:
@@ -94,8 +133,22 @@ def sync_activity(config: dict) -> bool:
         return False
 
 
+def sync_web_context(config: dict) -> bool:
+    app, title, url = active_window()
+    if not url:
+        return True
+    now = datetime.now(timezone.utc).isoformat()
+    return authenticated_json(
+        config["server_url"].rstrip("/") + "/ingest/v1/activity-events",
+        config["token"],
+        {"bucket": {"id": f"timewatcher-web_{platform.node()}", "type": "web.tab.current", "client": "timewatcher-agent", "hostname": platform.node(), "data": {}},
+         "events": [{"timestamp": now, "duration": max(30, int(config.get("interval_seconds", 60))), "data": {"url": url, "title": title, "app": app}}]},
+    )
+
+
 def run_once(config: dict) -> bool:
     activity_synced = sync_activity(config)
+    web_synced = sync_web_context(config)
     QUEUE.mkdir(parents=True, exist_ok=True)
     for pending in sorted(QUEUE.glob("*.jpg")):
         if upload(pending, config):
@@ -108,7 +161,7 @@ def run_once(config: dict) -> bool:
         return False
     if upload(target, config):
         target.unlink()
-        return activity_synced
+        return activity_synced and web_synced
     return False
 
 
@@ -120,7 +173,7 @@ def main() -> None:
     if "--once" in sys.argv:
         raise SystemExit(0 if run_once(config) else 1)
     if "--sync-only" in sys.argv:
-        raise SystemExit(0 if sync_activity(config) else 1)
+        raise SystemExit(0 if sync_activity(config) and sync_web_context(config) else 1)
     while True:
         run_once(config)
         time.sleep(interval)
