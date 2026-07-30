@@ -4,28 +4,23 @@
 
 timewatcher.32-193-139-223.sslip.io {
 	route {
-		handle /ingest/* {
+		# Agent ingestion — bearer-token endpoints only. Restricting to /v1/*
+		# closes the previous /ingest/* proxy that exposed the dashboard API
+		# without authentication.
+		handle /ingest/v1/* {
 			uri strip_prefix /ingest
 			reverse_proxy 127.0.0.1:5610
 		}
 
+		# Platform API — authentication is enforced by the app (session cookie),
+		# not by the proxy. No basic-auth, no injected user header.
 		handle /platform-api/* {
-			basic_auth {
-				timewatcher $2a$14$XQx/qUSClTYcgba8iZMn9uoLB/lRGgnSeWqhUgwMWZlKLOl9Hg5IK
-				timewatcher2 $2a$14$CEb.lIU55mNBn.IawRx1suE9oFL.j6sSfTMt7Tr4SchzM9hQvnJpq
-			}
 			uri strip_prefix /platform-api
-			reverse_proxy 127.0.0.1:5610 {
-				header_up X-TimeWatcher-User {http.auth.user.id}
-			}
+			reverse_proxy 127.0.0.1:5610
 		}
 
+		# Dashboard SPA — serves the login screen for anonymous visitors.
 		handle {
-			basic_auth {
-				timewatcher $2a$14$XQx/qUSClTYcgba8iZMn9uoLB/lRGgnSeWqhUgwMWZlKLOl9Hg5IK
-				timewatcher2 $2a$14$CEb.lIU55mNBn.IawRx1suE9oFL.j6sSfTMt7Tr4SchzM9hQvnJpq
-			}
-
 			reverse_proxy 127.0.0.1:3110
 		}
 	}

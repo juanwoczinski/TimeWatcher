@@ -8,6 +8,7 @@ Type=simple
 User=activitywatch
 Group=activitywatch
 EnvironmentFile=/etc/watchsynova/ingest.env
+Environment=TIMEWATCHER_BOOTSTRAP_ADMIN=gabreda188@gmail.com
 ExecStart=/usr/bin/python3 /opt/watchsynova-agent/ingest_server.py
 Restart=on-failure
 RestartSec=5

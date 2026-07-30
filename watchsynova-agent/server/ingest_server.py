@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tenant-aware ingestion and operational API for TimeWatcher."""
 
+import base64
 import csv
 import hashlib
 import hmac
@@ -30,6 +31,10 @@ AW_SERVER = os.environ.get("WATCHSYNOVA_AW_SERVER", "http://127.0.0.1:5600")
 OWNER_NAME = os.environ.get("TIMEWATCHER_OWNER_NAME", "Juan Kleber")
 TENANT_NAME = os.environ.get("TIMEWATCHER_TENANT_NAME", "Synova Tecnologia")
 LOCAL_TIMEZONE = ZoneInfo(os.environ.get("TIMEWATCHER_TIMEZONE", "America/Sao_Paulo"))
+SESSION_TTL_DAYS = 14
+SESSION_SECRET_ENV = os.environ.get("TIMEWATCHER_SESSION_SECRET", "")
+BOOTSTRAP_ADMIN = os.environ.get("TIMEWATCHER_BOOTSTRAP_ADMIN", "")
+PUBLIC_URL = os.environ.get("TIMEWATCHER_PUBLIC_URL", "https://timewatcher.32-193-139-223.sslip.io")
 PRODUCTIVE = {"chatgpt", "codex", "terminal", "visual studio code", "code", "xcode", "figma", "notion", "slack", "zoom", "meet", "docs", "drive", "github"}
 UNPRODUCTIVE = {"instagram", "facebook", "tiktok", "youtube", "netflix", "reddit", "twitter", "x.com"}
 
@@ -44,6 +49,8 @@ def default_config() -> dict:
         "schedules": [{"id": "standard", "tenantId": "synova", "name": "Jornada padrão", "start": "09:00", "end": "18:00", "breakMinutes": 60, "weekdays": [1, 2, 3, 4, 5]}],
         "people": [{"id": "juan-kleber", "tenantId": "synova", "name": OWNER_NAME, "role": "Administrador", "scheduleId": "standard", "deviceIds": []}],
         "enrollments": [],
+        "accounts": {},
+        "invites": [],
     }
 
 
@@ -108,10 +115,78 @@ def classify(value: str) -> str:
     return "neutral"
 
 
-def viewer(headers) -> dict:
-    username = headers.get("X-TimeWatcher-User", "timewatcher")
-    found = load_config()["users"].get(username)
-    return {"username": username, **(found or {"name": username, "role": "org_admin", "tenantId": "synova"})}
+def session_secret() -> bytes:
+    if SESSION_SECRET_ENV:
+        return SESSION_SECRET_ENV.encode()
+    config = load_config()
+    secret = config.get("secret")
+    if not secret:
+        secret = secrets.token_hex(32)
+        config["secret"] = secret
+        save_config(config)
+    return secret.encode()
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 200000)
+    return f"pbkdf2$200000${salt.hex()}${dk.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        _algo, iters, salt_hex, hash_hex = stored.split("$")
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt_hex), int(iters))
+        return hmac.compare_digest(dk.hex(), hash_hex)
+    except (ValueError, AttributeError):
+        return False
+
+
+def _b64u(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+
+def _b64u_decode(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def make_session(email: str) -> str:
+    exp = int((datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS)).timestamp())
+    payload = _b64u(json.dumps({"e": email, "exp": exp}).encode())
+    sig = _b64u(hmac.new(session_secret(), payload.encode(), hashlib.sha256).digest())
+    return f"{payload}.{sig}"
+
+
+def read_session(token: str) -> str | None:
+    try:
+        payload, sig = token.split(".", 1)
+        expected = _b64u(hmac.new(session_secret(), payload.encode(), hashlib.sha256).digest())
+        if not hmac.compare_digest(sig, expected):
+            return None
+        data = json.loads(_b64u_decode(payload))
+        if int(data["exp"]) < int(datetime.now(timezone.utc).timestamp()):
+            return None
+        return str(data["e"])
+    except (ValueError, KeyError, json.JSONDecodeError):
+        return None
+
+
+def get_cookie(headers, name: str) -> str:
+    for part in headers.get("Cookie", "").split(";"):
+        key, _, value = part.strip().partition("=")
+        if key == name:
+            return value
+    return ""
+
+
+def viewer(headers) -> dict | None:
+    email = read_session(get_cookie(headers, "tw_session"))
+    if not email:
+        return None
+    account = load_config()["accounts"].get(email)
+    if not account or account.get("status") != "active":
+        return None
+    return {"username": email, "email": email, "name": account.get("name", email), "role": account.get("role", "member"), "tenantId": account.get("tenantId", "synova")}
 
 
 def ingest_tenant(supplied_token: str) -> str | None:
@@ -254,7 +329,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlsplit(self.path); params = urllib.parse.parse_qs(parsed.query); current = viewer(self.headers)
-        if parsed.path == "/health": return self.send_json(200, {"status": "ok", "version": 2})
+        if parsed.path == "/health": return self.send_json(200, {"status": "ok", "version": 3})
+        if parsed.path == "/auth/invite": return self.invite_info(params)
+        if parsed.path == "/auth/me":
+            return self.send_json(200, current) if current else self.send_json(401, {"error": "unauthenticated"})
+        if parsed.path.startswith("/dashboard/") and not current: return self.send_json(401, {"error": "unauthenticated"})
+        if parsed.path == "/dashboard/invites":
+            if not self.authorized_admin(current): return self.send_json(403, {"error": "forbidden"})
+            return self.list_invites()
         if parsed.path == "/dashboard/data":
             try: return self.send_json(200, dashboard_data(params, current))
             except Exception as error: return self.send_json(502, {"error": "dashboard_unavailable", "detail": str(error)[:240]})
@@ -276,11 +358,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlsplit(self.path); current = viewer(self.headers)
-        if parsed.path == "/dashboard/avatar": return self.receive_avatar(current)
+        if parsed.path == "/auth/login": return self.do_login()
+        if parsed.path == "/auth/logout": return self.do_logout()
+        if parsed.path == "/auth/accept-invite": return self.do_accept_invite()
+        if parsed.path == "/dashboard/avatar":
+            if not current: return self.send_json(401, {"error": "unauthenticated"})
+            return self.receive_avatar(current)
         if parsed.path.startswith("/dashboard/"):
+            if not current: return self.send_json(401, {"error": "unauthenticated"})
             if not self.authorized_admin(current): return self.send_json(403, {"error": "forbidden"})
             try: payload = self.read_json(); config = load_config()
             except Exception: return self.send_json(400, {"error": "invalid_json"})
+            if parsed.path == "/dashboard/invites":
+                email = str(payload.get("email", "")).strip().lower(); role = payload.get("role", "member")
+                role = "org_admin" if role in ("admin", "administrador", "org_admin") else "member"
+                if "@" not in email or len(email) > 200: return self.send_json(400, {"error": "invalid_email"})
+                token = secrets.token_urlsafe(32); now = datetime.now(timezone.utc)
+                invite = {"email": email, "role": role, "tenantId": current["tenantId"], "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "createdAt": now.isoformat(), "expiresAt": (now + timedelta(days=7)).isoformat()}
+                config["invites"] = [i for i in config["invites"] if i.get("email") != email] + [invite]; save_config(config)
+                host = self.headers.get("Host") or urllib.parse.urlsplit(PUBLIC_URL).netloc
+                return self.send_json(201, {"email": email, "role": role, "inviteUrl": f"https://{host}/?invite={token}"})
             if parsed.path == "/dashboard/schedules":
                 schedule = {"id": payload.get("id") or str(uuid.uuid4()), "tenantId": current["tenantId"], "name": str(payload.get("name", "Jornada"))[:80], "start": str(payload.get("start", "09:00"))[:5], "end": str(payload.get("end", "18:00"))[:5], "breakMinutes": max(0, int(payload.get("breakMinutes", 60))), "weekdays": payload.get("weekdays", [1,2,3,4,5])}
                 config["schedules"] = [s for s in config["schedules"] if s["id"] != schedule["id"]] + [schedule]; save_config(config); return self.send_json(201, schedule)
@@ -350,6 +447,67 @@ class Handler(BaseHTTPRequestHandler):
         temporary_path.chmod(0o600); temporary_path.replace(path)
         self.send_json(201, {"ok": True})
 
+    def send_session(self, email: str, body: dict, status: int = 200) -> None:
+        token = make_session(email)
+        data = json.dumps(body, ensure_ascii=False).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Set-Cookie", f"tw_session={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={SESSION_TTL_DAYS * 86400}")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_login(self) -> None:
+        try: payload = self.read_json()
+        except Exception: return self.send_json(400, {"error": "invalid_json"})
+        email = str(payload.get("email", "")).strip().lower(); password = str(payload.get("password", ""))
+        account = load_config()["accounts"].get(email)
+        if not account or account.get("status") != "active" or not verify_password(password, account.get("pw", "")):
+            return self.send_json(401, {"error": "invalid_credentials"})
+        self.send_session(email, {"email": email, "name": account.get("name", email), "role": account.get("role"), "tenantId": account.get("tenantId")})
+
+    def do_logout(self) -> None:
+        data = json.dumps({"ok": True}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Set-Cookie", "tw_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def invite_info(self, params: dict) -> None:
+        token = params.get("token", [""])[0]; digest = hashlib.sha256(token.encode()).hexdigest(); now = datetime.now(timezone.utc)
+        for invite in load_config()["invites"]:
+            try:
+                if hmac.compare_digest(digest, invite["tokenHash"]) and parse_timestamp(invite["expiresAt"]) > now:
+                    return self.send_json(200, {"email": invite["email"], "role": invite["role"]})
+            except (KeyError, ValueError): continue
+        return self.send_json(404, {"error": "invalid_invite"})
+
+    def do_accept_invite(self) -> None:
+        try: payload = self.read_json()
+        except Exception: return self.send_json(400, {"error": "invalid_json"})
+        token = str(payload.get("token", "")); password = str(payload.get("password", ""))
+        if len(password) < 8: return self.send_json(400, {"error": "weak_password"})
+        digest = hashlib.sha256(token.encode()).hexdigest(); now = datetime.now(timezone.utc); config = load_config(); match = None
+        for invite in config["invites"]:
+            try:
+                if hmac.compare_digest(digest, invite["tokenHash"]) and parse_timestamp(invite["expiresAt"]) > now:
+                    match = invite; break
+            except (KeyError, ValueError): continue
+        if not match: return self.send_json(400, {"error": "invalid_invite"})
+        email = match["email"]
+        config["accounts"][email] = {"name": email.split("@")[0].replace(".", " ").replace("_", " ").title(), "role": match["role"], "tenantId": match.get("tenantId", "synova"), "status": "active", "pw": hash_password(password)}
+        config["invites"] = [i for i in config["invites"] if i.get("tokenHash") != match["tokenHash"]]; save_config(config)
+        account = config["accounts"][email]
+        self.send_session(email, {"email": email, "name": account["name"], "role": account["role"], "tenantId": account["tenantId"]})
+
+    def list_invites(self) -> None:
+        config = load_config()
+        accounts = [{"email": e, "name": a.get("name"), "role": a.get("role"), "status": a.get("status")} for e, a in config["accounts"].items()]
+        invites = [{"email": i["email"], "role": i["role"], "expiresAt": i["expiresAt"]} for i in config["invites"]]
+        self.send_json(200, {"accounts": accounts, "invites": invites})
+
     def receive_screenshot(self) -> None:
         if self.headers.get_content_type() != "image/jpeg": return self.send_json(415, {"error": "jpeg_required"})
         try: length = int(self.headers.get("Content-Length", "0"))
@@ -383,5 +541,27 @@ class Handler(BaseHTTPRequestHandler):
         print(f"{self.address_string()} - {fmt % args}", flush=True)
 
 
+def bootstrap_admin() -> None:
+    email = BOOTSTRAP_ADMIN.strip().lower()
+    if not email:
+        return
+    config = load_config()
+    if config.get("accounts"):
+        return
+    if any(i.get("email") == email for i in config.get("invites", [])):
+        return
+    token = secrets.token_urlsafe(32); now = datetime.now(timezone.utc)
+    config.setdefault("invites", []).append({"email": email, "role": "super_admin", "tenantId": "synova", "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "createdAt": now.isoformat(), "expiresAt": (now + timedelta(days=14)).isoformat()})
+    save_config(config)
+    link = f"{PUBLIC_URL}/?invite={token}"
+    try:
+        path = DATA_DIR / "bootstrap-admin-link.txt"
+        path.write_text(link + "\n")
+        path.chmod(0o600)
+    except OSError:
+        pass
+    print(f"[bootstrap] admin invite for {email}: {link}", flush=True)
+
+
 if __name__ == "__main__":
-    DATA_DIR.mkdir(parents=True, exist_ok=True); load_config(); ThreadingHTTPServer(("127.0.0.1", 5610), Handler).serve_forever()
+    DATA_DIR.mkdir(parents=True, exist_ok=True); load_config(); bootstrap_admin(); ThreadingHTTPServer(("127.0.0.1", 5610), Handler).serve_forever()

@@ -7,6 +7,7 @@ import {
   useState,
   type ChangeEvent,
 } from "react";
+import { AuthScreen } from "./auth-screen";
 
 type Period = "today" | "7d" | "30d" | "custom";
 type Section =
@@ -17,6 +18,7 @@ type Section =
   | "Atividades"
   | "Relatórios"
   | "Instaladores"
+  | "Usuários"
   | "Configurações"
   | "Minha conta";
 type Role = "super_admin" | "org_admin" | "manager" | "employee";
@@ -32,7 +34,8 @@ type IconName =
   | "chevron"
   | "logout"
   | "caret"
-  | "camera";
+  | "camera"
+  | "userplus";
 type Prefs = {
   collapsed: boolean;
   setCollapsed: (v: boolean) => void;
@@ -171,6 +174,7 @@ const baseNav: { name: Section; icon: IconName }[] = [
   { name: "Atividades", icon: "activity" },
   { name: "Relatórios", icon: "reports" },
   { name: "Instaladores", icon: "installers" },
+  { name: "Usuários", icon: "userplus" },
   { name: "Configurações", icon: "settings" },
 ];
 const desc: Record<Section, string> = {
@@ -181,8 +185,14 @@ const desc: Record<Section, string> = {
   Atividades: "Aplicativos, URLs, janelas, atividade e ociosidade.",
   Relatórios: "Filtros e exportações para análise operacional.",
   Instaladores: "Distribuição individual ou em massa vinculada ao tenant.",
+  Usuários: "Convites e contas de acesso da sua empresa.",
   Configurações: "Políticas de coleta, classificação e privacidade.",
   "Minha conta": "Perfil, segurança e preferências da sua conta.",
+};
+const ROLE_SHORT: Record<string, string> = {
+  super_admin: "Super admin",
+  org_admin: "Administrador",
+  member: "Membro",
 };
 function duration(v: number) {
   const t = Math.max(0, Math.round(v)),
@@ -389,6 +399,14 @@ function Icon({ name }: { name: IconName }) {
           <circle cx="12" cy="13" r="4" />
         </svg>
       );
+    case "userplus":
+      return (
+        <svg {...p}>
+          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+          <circle cx="9" cy="7" r="4" />
+          <path d="M19 8v6M22 11h-6" />
+        </svg>
+      );
   }
 }
 function OsLogo({ os }: { os: "apple" | "windows" | "deploy" }) {
@@ -510,7 +528,36 @@ const ACCOUNT_ROLE: Record<string, string> = {
   employee: "Colaborador",
 };
 
-export default function Dashboard() {
+export default function App() {
+  const [phase, setPhase] = useState<"loading" | "login" | "setpw" | "app">(
+    "loading",
+  );
+  const [inviteToken, setInviteToken] = useState<string | null>(null);
+  useEffect(() => {
+    let token: string | null = null;
+    try {
+      token = new URL(window.location.href).searchParams.get("invite");
+    } catch {}
+    if (token) {
+      setInviteToken(token);
+      setPhase("setpw");
+      return;
+    }
+    fetch("/platform-api/auth/me", { credentials: "same-origin" })
+      .then((r) => setPhase(r.ok ? "app" : "login"))
+      .catch(() => setPhase("login"));
+  }, []);
+  if (phase === "loading") return <div className="boot-screen" />;
+  if (phase === "app") return <Dashboard />;
+  return (
+    <AuthScreen
+      mode={phase === "setpw" ? "setpw" : "login"}
+      token={inviteToken}
+      onDone={() => window.location.replace("/")}
+    />
+  );
+}
+function Dashboard() {
   const [active, setActive] = useState<Section>("Visão geral"),
     [period, setPeriod] = useState<Period>("today"),
     [start, setStart] = useState(""),
@@ -570,9 +617,13 @@ export default function Dashboard() {
       })
       .catch(() => {});
   }, []);
-  const nav = baseNav.filter(
-    (n) => n.name !== "Empresas" || data?.viewer.role === "super_admin",
-  );
+  const isAdmin =
+    data?.viewer.role === "super_admin" || data?.viewer.role === "org_admin";
+  const nav = baseNav.filter((n) => {
+    if (n.name === "Empresas") return data?.viewer.role === "super_admin";
+    if (n.name === "Usuários") return isAdmin;
+    return true;
+  });
   const tenantName = data?.tenant.name || "TeamWatcher";
   const shownName = displayName || data?.viewer.name || "TeamWatcher";
   const initials =
@@ -598,9 +649,14 @@ export default function Dashboard() {
       else localStorage.removeItem("tw.displayName");
     } catch {}
   };
-  const logout = () => {
-    const { protocol, host } = window.location;
-    window.location.href = `${protocol}//loggedout:loggedout@${host}/?logout=1`;
+  const logout = async () => {
+    try {
+      await fetch("/platform-api/auth/logout", {
+        method: "POST",
+        credentials: "same-origin",
+      });
+    } catch {}
+    window.location.replace("/");
   };
   const openAccount = () => {
     setActive("Minha conta");
@@ -832,6 +888,7 @@ function Content({
       />
     );
   if (active === "Instaladores") return <Installers d={data} />;
+  if (active === "Usuários") return <Users d={data} />;
   if (active === "Minha conta") return <Account d={data} prefs={prefs} />;
   return <Settings d={data} prefs={prefs} />;
 }
@@ -1671,6 +1728,159 @@ function Settings({ d, prefs }: { d: Data; prefs: Prefs }) {
           ativos, jornadas e relatórios apenas da própria empresa.
         </p>
       </article>
+    </div>
+  );
+}
+function Users({ d }: { d: Data }) {
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<"member" | "admin">("member");
+  const [link, setLink] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [list, setList] = useState<{
+    accounts: { email: string; name?: string; role: string; status?: string }[];
+    invites: { email: string; role: string; expiresAt: string }[];
+  } | null>(null);
+  const load = useCallback(() => {
+    fetch("/platform-api/dashboard/invites", { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then(setList)
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+  const invite = async () => {
+    if (!email.includes("@")) return;
+    setBusy(true);
+    setLink("");
+    setCopied(false);
+    try {
+      const r = await fetch("/platform-api/dashboard/invites", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ email, role }),
+      });
+      const x = await r.json();
+      if (r.ok) {
+        setLink(x.inviteUrl || "");
+        setEmail("");
+        load();
+      }
+    } catch {}
+    setBusy(false);
+  };
+  return (
+    <div className="page-stack">
+      <div className="section-summary">
+        <strong>Convide pessoas para {d.tenant.name}</strong>
+        <span>
+          Acesso é apenas por convite. A pessoa recebe um link, define a senha e
+          já entra — não há cadastro aberto.
+        </span>
+      </div>
+      <article className="card">
+        <div className="card-head">
+          <div>
+            <h2>Convidar usuário</h2>
+            <p>Gera um magic link de 7 dias para definir a senha.</p>
+          </div>
+        </div>
+        <div className="invite-form">
+          <input
+            type="email"
+            placeholder="email@empresa.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+          <select
+            value={role}
+            onChange={(e) => setRole(e.target.value as "member" | "admin")}
+          >
+            <option value="member">Membro</option>
+            <option value="admin">Administrador</option>
+          </select>
+          <button
+            className="btn"
+            onClick={invite}
+            disabled={busy || !email.includes("@")}
+          >
+            {busy ? "Gerando…" : "Gerar convite"}
+          </button>
+        </div>
+        {link && (
+          <div className="invite-link">
+            <span>Magic link — envie para a pessoa:</span>
+            <div className="invite-link-row">
+              <code>{link}</code>
+              <button
+                className="btn ghost"
+                onClick={() => {
+                  navigator.clipboard?.writeText(link);
+                  setCopied(true);
+                }}
+              >
+                {copied ? "Copiado" : "Copiar"}
+              </button>
+            </div>
+          </div>
+        )}
+      </article>
+      <div className="account-grid">
+        <article className="card">
+          <div className="card-head">
+            <div>
+              <h2>Contas ativas</h2>
+              <p>{list?.accounts.length || 0} usuário(s)</p>
+            </div>
+          </div>
+          <div className="user-list">
+            {list?.accounts.length ? (
+              list.accounts.map((a) => (
+                <div className="user-row" key={a.email}>
+                  <div>
+                    <strong>{a.name || a.email}</strong>
+                    <small>{a.email}</small>
+                  </div>
+                  <span
+                    className={`pill ${a.role === "member" ? "offline" : "online"}`}
+                  >
+                    {ROLE_SHORT[a.role] || a.role}
+                  </span>
+                </div>
+              ))
+            ) : (
+              <State text="Nenhuma conta ativa ainda." />
+            )}
+          </div>
+        </article>
+        <article className="card">
+          <div className="card-head">
+            <div>
+              <h2>Convites pendentes</h2>
+              <p>{list?.invites.length || 0}</p>
+            </div>
+          </div>
+          <div className="user-list">
+            {list?.invites.length ? (
+              list.invites.map((i) => (
+                <div className="user-row" key={i.email}>
+                  <div>
+                    <strong>{i.email}</strong>
+                    <small>expira {date(i.expiresAt)}</small>
+                  </div>
+                  <span className="pill offline">
+                    {ROLE_SHORT[i.role] || i.role}
+                  </span>
+                </div>
+              ))
+            ) : (
+              <State text="Sem convites pendentes." />
+            )}
+          </div>
+        </article>
+      </div>
     </div>
   );
 }

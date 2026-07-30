@@ -1965,6 +1965,11 @@ h3 {
   }
 }
 
+.boot-screen {
+  min-height: 100vh;
+  background: var(--bg);
+}
+
 /* ---------- Avatar image ---------- */
 .avatar {
   overflow: hidden;
@@ -2182,5 +2187,90 @@ h3 {
   }
   .profile-actions {
     justify-content: center;
+  }
+}
+
+/* ---------- Users / invites ---------- */
+.invite-form {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+.invite-form input {
+  flex: 1;
+  min-width: 220px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--surface);
+}
+.invite-form select {
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--ink-2);
+  background: var(--surface);
+}
+.invite-link {
+  margin-top: 16px;
+  padding: 14px;
+  border-radius: var(--r-md);
+  background: #f7f9fc;
+  border: 1px solid var(--line);
+}
+.invite-link > span {
+  font-size: 12px;
+  color: var(--muted);
+}
+.invite-link-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 8px;
+}
+.invite-link-row code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-family: var(--data);
+  font-size: 12px;
+  color: var(--blue);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 9px 11px;
+}
+.user-list {
+  margin-top: 6px;
+}
+.user-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+.user-row:first-child {
+  border-top: 0;
+}
+.user-row strong {
+  display: block;
+  font-size: 13px;
+}
+.user-row small {
+  display: block;
+  font-size: 11px;
+  color: var(--faint);
+  margin-top: 2px;
+}
+@media (max-width: 640px) {
+  .invite-form input {
+    min-width: 0;
   }
 }
