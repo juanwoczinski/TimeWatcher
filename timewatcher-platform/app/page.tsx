@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+} from "react";
 
 type Period = "today" | "7d" | "30d" | "custom";
 type Section =
@@ -11,7 +17,8 @@ type Section =
   | "Atividades"
   | "Relatórios"
   | "Instaladores"
-  | "Configurações";
+  | "Configurações"
+  | "Minha conta";
 type Role = "super_admin" | "org_admin" | "manager" | "employee";
 type IconName =
   | "overview"
@@ -24,7 +31,8 @@ type IconName =
   | "settings"
   | "chevron"
   | "logout"
-  | "caret";
+  | "caret"
+  | "camera";
 type Prefs = {
   collapsed: boolean;
   setCollapsed: (v: boolean) => void;
@@ -32,6 +40,10 @@ type Prefs = {
   setDensity: (v: "comfortable" | "compact") => void;
   period: Period;
   setPeriod: (v: Period) => void;
+  avatar: string | null;
+  setAvatar: (v: string | null) => void;
+  displayName: string;
+  setDisplayName: (v: string) => void;
 };
 type App = {
   name: string;
@@ -170,6 +182,7 @@ const desc: Record<Section, string> = {
   Relatórios: "Filtros e exportações para análise operacional.",
   Instaladores: "Distribuição individual ou em massa vinculada ao tenant.",
   Configurações: "Políticas de coleta, classificação e privacidade.",
+  "Minha conta": "Perfil, segurança e preferências da sua conta.",
 };
 function duration(v: number) {
   const t = Math.max(0, Math.round(v)),
@@ -369,6 +382,13 @@ function Icon({ name }: { name: IconName }) {
           <path d="M6 9l6 6 6-6" />
         </svg>
       );
+    case "camera":
+      return (
+        <svg {...p}>
+          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+          <circle cx="12" cy="13" r="4" />
+        </svg>
+      );
   }
 }
 function OsLogo({ os }: { os: "apple" | "windows" | "deploy" }) {
@@ -402,6 +422,82 @@ function OsLogo({ os }: { os: "apple" | "windows" | "deploy" }) {
     </svg>
   );
 }
+function Avatar({
+  src,
+  initials,
+  className = "",
+}: {
+  src: string | null;
+  initials: string;
+  className?: string;
+}) {
+  return (
+    <div className={`avatar ${className}`}>
+      {src ? <img src={src} alt="" /> : initials}
+    </div>
+  );
+}
+function Toggle({
+  on,
+  onChange,
+  label,
+}: {
+  on: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      className={`switch ${on ? "on" : ""}`}
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      onClick={() => onChange(!on)}
+    >
+      <span />
+    </button>
+  );
+}
+function readAvatar(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("read"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("decode"));
+      img.onload = () => {
+        const size = 256;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return reject(new Error("canvas"));
+        const min = Math.min(img.width, img.height);
+        ctx.drawImage(
+          img,
+          (img.width - min) / 2,
+          (img.height - min) / 2,
+          min,
+          min,
+          0,
+          0,
+          size,
+          size,
+        );
+        resolve(canvas.toDataURL("image/jpeg", 0.85));
+      };
+      img.src = reader.result as string;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+const ACCOUNT_ROLE: Record<string, string> = {
+  super_admin: "Super admin · Synova",
+  org_admin: "Admin da organização",
+  manager: "Gestor",
+  employee: "Colaborador",
+};
 
 export default function Dashboard() {
   const [active, setActive] = useState<Section>("Visão geral"),
@@ -417,6 +513,8 @@ export default function Dashboard() {
     "comfortable",
   );
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [displayName, setDisplayName] = useState("");
   const load = useCallback(async () => {
     try {
       setError("");
@@ -452,14 +550,19 @@ export default function Dashboard() {
       if (localStorage.getItem("tw.density") === "compact") setDensity("compact");
       const p = localStorage.getItem("tw.period");
       if (p === "today" || p === "7d" || p === "30d") setPeriod(p);
+      const av = localStorage.getItem("tw.avatar");
+      if (av) setAvatarUrl(av);
+      const dn = localStorage.getItem("tw.displayName");
+      if (dn) setDisplayName(dn);
     } catch {}
   }, []);
   const nav = baseNav.filter(
     (n) => n.name !== "Empresas" || data?.viewer.role === "super_admin",
   );
   const tenantName = data?.tenant.name || "TeamWatcher";
+  const shownName = displayName || data?.viewer.name || "TeamWatcher";
   const initials =
-    (data?.viewer.name || "TW")
+    shownName
       .split(" ")
       .filter(Boolean)
       .slice(0, 2)
@@ -474,12 +577,26 @@ export default function Dashboard() {
       } catch {}
       return nv;
     });
+  const setAvatar = (v: string | null) => {
+    setAvatarUrl(v);
+    try {
+      if (v) localStorage.setItem("tw.avatar", v);
+      else localStorage.removeItem("tw.avatar");
+    } catch {}
+  };
+  const setName = (v: string) => {
+    setDisplayName(v);
+    try {
+      if (v) localStorage.setItem("tw.displayName", v);
+      else localStorage.removeItem("tw.displayName");
+    } catch {}
+  };
   const logout = () => {
     const { protocol, host } = window.location;
     window.location.href = `${protocol}//loggedout:loggedout@${host}/?logout=1`;
   };
   const openAccount = () => {
-    setActive("Configurações");
+    setActive("Minha conta");
     setUserMenuOpen(false);
   };
   const prefs: Prefs = {
@@ -489,6 +606,10 @@ export default function Dashboard() {
     setDensity,
     period,
     setPeriod,
+    avatar: avatarUrl,
+    setAvatar,
+    displayName,
+    setDisplayName: setName,
   };
   return (
     <main
@@ -547,11 +668,11 @@ export default function Dashboard() {
             onClick={() => setUserMenuOpen((v) => !v)}
             aria-haspopup="menu"
             aria-expanded={userMenuOpen}
-            title={data?.viewer.name || "Conta"}
+            title={shownName}
           >
-            <div className="avatar">{initials}</div>
+            <Avatar src={avatarUrl} initials={initials} />
             <div className="user-meta">
-              <strong>{data?.viewer.name || "TeamWatcher"}</strong>
+              <strong>{shownName}</strong>
               <span>
                 {data?.viewer.role === "super_admin"
                   ? "Super admin Synova"
@@ -704,6 +825,7 @@ function Content({
       />
     );
   if (active === "Instaladores") return <Installers d={data} />;
+  if (active === "Minha conta") return <Account d={data} prefs={prefs} />;
   return <Settings d={data} prefs={prefs} />;
 }
 function State({ text }: { text: string }) {
@@ -1542,6 +1664,296 @@ function Settings({ d, prefs }: { d: Data; prefs: Prefs }) {
           ativos, jornadas e relatórios apenas da própria empresa.
         </p>
       </article>
+    </div>
+  );
+}
+function Account({ d, prefs }: { d: Data; prefs: Prefs }) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [nameDraft, setNameDraft] = useState(prefs.displayName || d.viewer.name);
+  const [nameSaved, setNameSaved] = useState(false);
+  const [mfa, setMfa] = useState(() => {
+    try {
+      return localStorage.getItem("tw.mfa") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [notif, setNotif] = useState<Record<string, boolean>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("tw.notif") || "{}");
+    } catch {
+      return {};
+    }
+  });
+  const initials =
+    (prefs.displayName || d.viewer.name || "TW")
+      .split(" ")
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((w) => w[0])
+      .join("")
+      .toUpperCase() || "TW";
+  const setNotifKey = (k: string, v: boolean) => {
+    const next = { ...notif, [k]: v };
+    setNotif(next);
+    persist("tw.notif", JSON.stringify(next));
+  };
+  const toggleMfa = (v: boolean) => {
+    setMfa(v);
+    persist("tw.mfa", v ? "1" : "0");
+  };
+  const onFile = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      prefs.setAvatar(await readAvatar(file));
+    } catch {}
+  };
+  return (
+    <div className="account">
+      <article className="card account-profile">
+        <div className="profile-head">
+          <div className="profile-avatar">
+            <Avatar src={prefs.avatar} initials={initials} className="xl" />
+            <button
+              type="button"
+              className="avatar-edit"
+              onClick={() => fileRef.current?.click()}
+              aria-label="Enviar foto de perfil"
+            >
+              <Icon name="camera" />
+            </button>
+          </div>
+          <div className="profile-meta">
+            <h2>{prefs.displayName || d.viewer.name}</h2>
+            <p>
+              {ACCOUNT_ROLE[d.viewer.role] || d.viewer.role} · {d.tenant.name}
+            </p>
+            <div className="profile-actions">
+              <button
+                type="button"
+                className="btn"
+                onClick={() => fileRef.current?.click()}
+              >
+                Enviar foto
+              </button>
+              {prefs.avatar && (
+                <button
+                  type="button"
+                  className="btn ghost"
+                  onClick={() => prefs.setAvatar(null)}
+                >
+                  Remover
+                </button>
+              )}
+            </div>
+          </div>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            hidden
+            onChange={onFile}
+          />
+        </div>
+      </article>
+      <div className="account-grid">
+        <article className="card">
+          <h2>Perfil</h2>
+          <div className="field">
+            <label>Nome de exibição</label>
+            <div className="field-row">
+              <input
+                value={nameDraft}
+                onChange={(e) => {
+                  setNameDraft(e.target.value);
+                  setNameSaved(false);
+                }}
+                placeholder="Seu nome"
+              />
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  prefs.setDisplayName(nameDraft.trim());
+                  setNameSaved(true);
+                }}
+              >
+                Salvar
+              </button>
+            </div>
+            <span className="hint">
+              {nameSaved
+                ? "Salvo neste navegador."
+                : "Aparece na barra lateral e no menu."}
+            </span>
+          </div>
+          <dl className="settings-list">
+            <div>
+              <dt>E-mail / usuário</dt>
+              <dd>{d.viewer.username}</dd>
+            </div>
+            <div>
+              <dt>Perfil de acesso</dt>
+              <dd>{ACCOUNT_ROLE[d.viewer.role] || d.viewer.role}</dd>
+            </div>
+            <div>
+              <dt>Empresa</dt>
+              <dd>{d.tenant.name}</dd>
+            </div>
+          </dl>
+        </article>
+        <article className="card">
+          <h2>Segurança</h2>
+          <div className="pref-row">
+            <div>
+              <strong>Autenticação em duas etapas (MFA)</strong>
+              <span>Camada extra de proteção ao entrar</span>
+            </div>
+            <Toggle on={mfa} onChange={toggleMfa} label="MFA" />
+          </div>
+          {mfa && (
+            <div className="mfa-box">
+              <span className="tag demo">Demonstração</span>
+              <p>Escaneie no app autenticador ou use a chave manual:</p>
+              <code>JBSW Y3DP EHPK 3PXP</code>
+              <p className="hint">
+                A ativação real de MFA entra em uma próxima versão.
+              </p>
+            </div>
+          )}
+          <div className="pref-row">
+            <div>
+              <strong>Senha</strong>
+              <span>Autenticação gerenciada pela organização</span>
+            </div>
+            <button type="button" className="btn ghost" disabled>
+              Trocar senha
+            </button>
+          </div>
+          <div className="pref-row">
+            <div>
+              <strong>Sessão atual</strong>
+              <span>Este navegador</span>
+            </div>
+            <span className="pill online">Ativa</span>
+          </div>
+        </article>
+        <article className="card">
+          <h2>Aparência</h2>
+          <div className="pref-list">
+            <div className="pref-row">
+              <div>
+                <strong>Densidade</strong>
+                <span>Espaçamento da interface</span>
+              </div>
+              <div className="seg">
+                <button
+                  className={prefs.density === "comfortable" ? "on" : ""}
+                  onClick={() => {
+                    prefs.setDensity("comfortable");
+                    persist("tw.density", "comfortable");
+                  }}
+                >
+                  Confortável
+                </button>
+                <button
+                  className={prefs.density === "compact" ? "on" : ""}
+                  onClick={() => {
+                    prefs.setDensity("compact");
+                    persist("tw.density", "compact");
+                  }}
+                >
+                  Compacto
+                </button>
+              </div>
+            </div>
+            <div className="pref-row">
+              <div>
+                <strong>Menu lateral</strong>
+                <span>Estado padrão da barra</span>
+              </div>
+              <div className="seg">
+                <button
+                  className={!prefs.collapsed ? "on" : ""}
+                  onClick={() => {
+                    prefs.setCollapsed(false);
+                    persist("tw.collapsed", "0");
+                  }}
+                >
+                  Expandido
+                </button>
+                <button
+                  className={prefs.collapsed ? "on" : ""}
+                  onClick={() => {
+                    prefs.setCollapsed(true);
+                    persist("tw.collapsed", "1");
+                  }}
+                >
+                  Recolhido
+                </button>
+              </div>
+            </div>
+            <div className="pref-row">
+              <div>
+                <strong>Período padrão</strong>
+                <span>Filtro aplicado ao abrir o painel</span>
+              </div>
+              <select
+                value={prefs.period === "custom" ? "today" : prefs.period}
+                onChange={(e) => {
+                  prefs.setPeriod(e.target.value as Period);
+                  persist("tw.period", e.target.value);
+                }}
+              >
+                <option value="today">Hoje</option>
+                <option value="7d">7 dias</option>
+                <option value="30d">30 dias</option>
+              </select>
+            </div>
+          </div>
+        </article>
+        <article className="card">
+          <h2>Notificações</h2>
+          <p className="settings-copy">Preferências salvas neste navegador.</p>
+          <div className="pref-list">
+            <div className="pref-row">
+              <div>
+                <strong>Agente offline</strong>
+                <span>Quando um dispositivo para de enviar</span>
+              </div>
+              <Toggle
+                on={!!notif.offline}
+                onChange={(v) => setNotifKey("offline", v)}
+                label="Agente offline"
+              />
+            </div>
+            <div className="pref-row">
+              <div>
+                <strong>Ociosidade longa</strong>
+                <span>Períodos extensos sem interação</span>
+              </div>
+              <Toggle
+                on={!!notif.idle}
+                onChange={(v) => setNotifKey("idle", v)}
+                label="Ociosidade longa"
+              />
+            </div>
+            <div className="pref-row">
+              <div>
+                <strong>Desvio de jornada</strong>
+                <span>Início ou término fora do previsto</span>
+              </div>
+              <Toggle
+                on={!!notif.schedule}
+                onChange={(v) => setNotifKey("schedule", v)}
+                label="Desvio de jornada"
+              />
+            </div>
+          </div>
+        </article>
+      </div>
     </div>
   );
 }
