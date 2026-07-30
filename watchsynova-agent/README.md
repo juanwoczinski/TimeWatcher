@@ -18,6 +18,7 @@ run alongside ActivityWatch and records screenshot metadata in a
 ## Components
 
 - `macos/watchsynova_screenshot_agent.py`: capture, retry queue and upload.
+- `macos/WatchSynovaCapture.swift`: native consent prompt and visible menu-bar app.
 - `macos/com.watchsynova.screenshot-agent.plist`: per-user background service.
 - `server/ingest_server.py`: authenticated, size-limited JPEG receiver.
 - `server/watchsynova-ingest.service`: hardened systemd service.
