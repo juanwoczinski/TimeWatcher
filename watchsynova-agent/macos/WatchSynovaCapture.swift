@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CoreGraphics
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -7,11 +8,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var timer: Timer?
     private var statusItem: NSStatusItem?
     private var modules: [Process] = []
+    private var accessibilityModulesStarted = false
+    private var accessibilityTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         configureStatusItem()
-        startActivityModules()
+        startCoreModules()
         requestPermissionAndStart()
     }
 
@@ -62,13 +65,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func startActivityModules() {
+    private func startCoreModules() {
         startModule("aw-server")
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             self?.startModule("aw-watcher-afk")
-            self?.startModule("aw-watcher-window")
-            self?.startModule("aw-watcher-input")
+            self?.requestAccessibilityOnce()
         }
+    }
+
+    private func requestAccessibilityOnce() {
+        let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        if AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary) {
+            startAccessibilityModules()
+            return
+        }
+        setStatus("Accessibility permission required once")
+        accessibilityTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] timer in
+            guard AXIsProcessTrusted() else { return }
+            timer.invalidate()
+            self?.startAccessibilityModules()
+        }
+    }
+
+    private func startAccessibilityModules() {
+        guard !accessibilityModulesStarted else { return }
+        accessibilityModulesStarted = true
+        startModule("aw-watcher-window")
+        startModule("aw-watcher-input")
+        setStatus("Monitoring and secure sync enabled")
     }
 
     private func startModule(_ name: String) {
@@ -100,6 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         timer?.invalidate()
+        accessibilityTimer?.invalidate()
         for process in modules where process.isRunning { process.terminate() }
     }
 }
