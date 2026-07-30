@@ -422,6 +422,7 @@ function OsLogo({ os }: { os: "apple" | "windows" | "deploy" }) {
     </svg>
   );
 }
+const AVATAR_URL = "/platform-api/dashboard/avatar";
 function Avatar({
   src,
   initials,
@@ -431,9 +432,15 @@ function Avatar({
   initials: string;
   className?: string;
 }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [src]);
   return (
     <div className={`avatar ${className}`}>
-      {src ? <img src={src} alt="" /> : initials}
+      {src && !failed ? (
+        <img src={src} alt="" onError={() => setFailed(true)} />
+      ) : (
+        initials
+      )}
     </div>
   );
 }
@@ -459,7 +466,7 @@ function Toggle({
     </button>
   );
 }
-function readAvatar(file: File): Promise<string> {
+function processAvatarBlob(file: File): Promise<Blob> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error("read"));
@@ -485,7 +492,11 @@ function readAvatar(file: File): Promise<string> {
           size,
           size,
         );
-        resolve(canvas.toDataURL("image/jpeg", 0.85));
+        canvas.toBlob(
+          (b) => (b ? resolve(b) : reject(new Error("encode"))),
+          "image/jpeg",
+          0.85,
+        );
       };
       img.src = reader.result as string;
     };
@@ -550,11 +561,14 @@ export default function Dashboard() {
       if (localStorage.getItem("tw.density") === "compact") setDensity("compact");
       const p = localStorage.getItem("tw.period");
       if (p === "today" || p === "7d" || p === "30d") setPeriod(p);
-      const av = localStorage.getItem("tw.avatar");
-      if (av) setAvatarUrl(av);
       const dn = localStorage.getItem("tw.displayName");
       if (dn) setDisplayName(dn);
     } catch {}
+    fetch(AVATAR_URL, { credentials: "same-origin", cache: "no-store" })
+      .then((r) => {
+        if (r.ok) setAvatarUrl(`${AVATAR_URL}?v=${Date.now()}`);
+      })
+      .catch(() => {});
   }, []);
   const nav = baseNav.filter(
     (n) => n.name !== "Empresas" || data?.viewer.role === "super_admin",
@@ -577,13 +591,6 @@ export default function Dashboard() {
       } catch {}
       return nv;
     });
-  const setAvatar = (v: string | null) => {
-    setAvatarUrl(v);
-    try {
-      if (v) localStorage.setItem("tw.avatar", v);
-      else localStorage.removeItem("tw.avatar");
-    } catch {}
-  };
   const setName = (v: string) => {
     setDisplayName(v);
     try {
@@ -607,7 +614,7 @@ export default function Dashboard() {
     period,
     setPeriod,
     avatar: avatarUrl,
-    setAvatar,
+    setAvatar: setAvatarUrl,
     displayName,
     setDisplayName: setName,
   };
@@ -1671,6 +1678,7 @@ function Account({ d, prefs }: { d: Data; prefs: Prefs }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [nameDraft, setNameDraft] = useState(prefs.displayName || d.viewer.name);
   const [nameSaved, setNameSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [mfa, setMfa] = useState(() => {
     try {
       return localStorage.getItem("tw.mfa") === "1";
@@ -1706,9 +1714,31 @@ function Account({ d, prefs }: { d: Data; prefs: Prefs }) {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
+    setBusy(true);
     try {
-      prefs.setAvatar(await readAvatar(file));
+      const blob = await processAvatarBlob(file);
+      const r = await fetch(AVATAR_URL, {
+        method: "POST",
+        headers: { "Content-Type": "image/jpeg" },
+        credentials: "same-origin",
+        body: blob,
+      });
+      if (r.ok) prefs.setAvatar(`${AVATAR_URL}?v=${Date.now()}`);
     } catch {}
+    setBusy(false);
+  };
+  const removePhoto = async () => {
+    setBusy(true);
+    try {
+      await fetch(AVATAR_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        credentials: "same-origin",
+        body: "",
+      });
+    } catch {}
+    prefs.setAvatar(null);
+    setBusy(false);
   };
   return (
     <div className="account">
@@ -1735,14 +1765,16 @@ function Account({ d, prefs }: { d: Data; prefs: Prefs }) {
                 type="button"
                 className="btn"
                 onClick={() => fileRef.current?.click()}
+                disabled={busy}
               >
-                Enviar foto
+                {busy ? "Enviando…" : "Enviar foto"}
               </button>
               {prefs.avatar && (
                 <button
                   type="button"
                   className="btn ghost"
-                  onClick={() => prefs.setAvatar(null)}
+                  onClick={removePhoto}
+                  disabled={busy}
                 >
                   Remover
                 </button>

@@ -21,8 +21,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_AVATAR_BYTES = 3 * 1024 * 1024
 DATA_DIR = Path(os.environ.get("WATCHSYNOVA_DATA_DIR", "/var/lib/watchsynova-ingest"))
 CONFIG_FILE = DATA_DIR / "platform-config.json"
+AVATAR_DIR = DATA_DIR / "avatars"
 TOKEN = os.environ["WATCHSYNOVA_INGEST_TOKEN"]
 AW_SERVER = os.environ.get("WATCHSYNOVA_AW_SERVER", "http://127.0.0.1:5600")
 OWNER_NAME = os.environ.get("TIMEWATCHER_OWNER_NAME", "Juan Kleber")
@@ -269,10 +271,12 @@ class Handler(BaseHTTPRequestHandler):
             tenant_id = params.get("tenant", [current["tenantId"]])[0] if current["role"] == "super_admin" else current["tenantId"]
             return self.list_screenshots(current, tenant_id)
         if parsed.path.startswith("/dashboard/screenshots/"): return self.serve_screenshot(parsed.path.rsplit("/", 1)[-1])
+        if parsed.path == "/dashboard/avatar": return self.serve_avatar(current)
         return self.send_json(404, {"error": "not_found"})
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlsplit(self.path); current = viewer(self.headers)
+        if parsed.path == "/dashboard/avatar": return self.receive_avatar(current)
         if parsed.path.startswith("/dashboard/"):
             if not self.authorized_admin(current): return self.send_json(403, {"error": "forbidden"})
             try: payload = self.read_json(); config = load_config()
@@ -322,6 +326,29 @@ class Handler(BaseHTTPRequestHandler):
         matches = list((DATA_DIR / "screenshots").rglob(f"{image_id}.jpg"))
         if not matches: return self.send_json(404, {"error": "not_found"})
         image = matches[0].read_bytes(); self.send_response(200); self.send_header("Content-Type", "image/jpeg"); self.send_header("Cache-Control", "private, max-age=300"); self.send_header("Content-Length", str(len(image))); self.end_headers(); self.wfile.write(image)
+
+    def avatar_path(self, current: dict) -> Path:
+        user = re.sub(r"[^a-z0-9_-]", "", str(current.get("username", "")).lower()) or "user"
+        return AVATAR_DIR / f"{user}.jpg"
+
+    def serve_avatar(self, current: dict) -> None:
+        path = self.avatar_path(current)
+        if not path.exists(): return self.send_json(404, {"error": "not_found"})
+        image = path.read_bytes(); self.send_response(200); self.send_header("Content-Type", "image/jpeg"); self.send_header("Cache-Control", "private, max-age=30"); self.send_header("Content-Length", str(len(image))); self.end_headers(); self.wfile.write(image)
+
+    def receive_avatar(self, current: dict) -> None:
+        try: length = int(self.headers.get("Content-Length", "0"))
+        except ValueError: length = 0
+        path = self.avatar_path(current)
+        if length <= 0:
+            path.unlink(missing_ok=True); return self.send_json(200, {"deleted": True})
+        if length > MAX_AVATAR_BYTES: return self.send_json(413, {"error": "invalid_size"})
+        image = self.rfile.read(length)
+        if len(image) != length or not image.startswith(b"\xff\xd8\xff"): return self.send_json(400, {"error": "invalid_jpeg"})
+        AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=AVATAR_DIR, delete=False) as temporary: temporary.write(image); temporary.flush(); os.fsync(temporary.fileno()); temporary_path = Path(temporary.name)
+        temporary_path.chmod(0o600); temporary_path.replace(path)
+        self.send_json(201, {"ok": True})
 
     def receive_screenshot(self) -> None:
         if self.headers.get_content_type() != "image/jpeg": return self.send_json(415, {"error": "jpeg_required"})
