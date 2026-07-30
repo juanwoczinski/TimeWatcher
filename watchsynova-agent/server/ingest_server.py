@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import tempfile
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -115,16 +116,44 @@ def classify(value: str) -> str:
     return "neutral"
 
 
+_CONFIG_LOCK = threading.Lock()
+_SESSION_SECRET_CACHE: bytes | None = None
+SECRET_FILE = DATA_DIR / "session-secret"
+
+
 def session_secret() -> bytes:
+    # The signing secret lives in its own file (not the shared, concurrently
+    # written config) and is cached per process, so it never changes at runtime
+    # and never gets dropped by a racing config write — which would silently
+    # invalidate every active session.
+    global _SESSION_SECRET_CACHE
     if SESSION_SECRET_ENV:
         return SESSION_SECRET_ENV.encode()
-    config = load_config()
-    secret = config.get("secret")
-    if not secret:
-        secret = secrets.token_hex(32)
-        config["secret"] = secret
-        save_config(config)
-    return secret.encode()
+    if _SESSION_SECRET_CACHE is not None:
+        return _SESSION_SECRET_CACHE
+    with _CONFIG_LOCK:
+        if _SESSION_SECRET_CACHE is not None:
+            return _SESSION_SECRET_CACHE
+        try:
+            secret = SECRET_FILE.read_text().strip()
+        except OSError:
+            secret = ""
+        if not secret:
+            # Migrate an existing config secret to the file so sessions signed
+            # before this change stay valid; otherwise generate a fresh one.
+            try:
+                secret = str(load_config().get("secret") or "").strip()
+            except (OSError, json.JSONDecodeError):
+                secret = ""
+            if not secret:
+                secret = secrets.token_hex(32)
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            temporary = SECRET_FILE.with_name("session-secret.tmp")
+            temporary.write_text(secret)
+            temporary.chmod(0o600)
+            temporary.replace(SECRET_FILE)
+        _SESSION_SECRET_CACHE = secret.encode()
+        return _SESSION_SECRET_CACHE
 
 
 def hash_password(password: str) -> str:
@@ -367,31 +396,33 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/dashboard/"):
             if not current: return self.send_json(401, {"error": "unauthenticated"})
             if not self.authorized_admin(current): return self.send_json(403, {"error": "forbidden"})
-            try: payload = self.read_json(); config = load_config()
+            try: payload = self.read_json()
             except Exception: return self.send_json(400, {"error": "invalid_json"})
-            if parsed.path == "/dashboard/invites":
-                email = str(payload.get("email", "")).strip().lower(); role = payload.get("role", "member")
-                role = "org_admin" if role in ("admin", "administrador", "org_admin") else "member"
-                if "@" not in email or len(email) > 200: return self.send_json(400, {"error": "invalid_email"})
-                token = secrets.token_urlsafe(32); now = datetime.now(timezone.utc)
-                invite = {"email": email, "role": role, "tenantId": current["tenantId"], "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "createdAt": now.isoformat(), "expiresAt": (now + timedelta(days=7)).isoformat()}
-                config["invites"] = [i for i in config["invites"] if i.get("email") != email] + [invite]; save_config(config)
-                host = self.headers.get("Host") or urllib.parse.urlsplit(PUBLIC_URL).netloc
-                return self.send_json(201, {"email": email, "role": role, "inviteUrl": f"https://{host}/?invite={token}"})
-            if parsed.path == "/dashboard/schedules":
-                schedule = {"id": payload.get("id") or str(uuid.uuid4()), "tenantId": current["tenantId"], "name": str(payload.get("name", "Jornada"))[:80], "start": str(payload.get("start", "09:00"))[:5], "end": str(payload.get("end", "18:00"))[:5], "breakMinutes": max(0, int(payload.get("breakMinutes", 60))), "weekdays": payload.get("weekdays", [1,2,3,4,5])}
-                config["schedules"] = [s for s in config["schedules"] if s["id"] != schedule["id"]] + [schedule]; save_config(config); return self.send_json(201, schedule)
-            if parsed.path == "/dashboard/people/schedule":
-                ids = payload.get("personIds", []); schedule_id = payload.get("scheduleId")
-                for person in config["people"]:
-                    if person["id"] in ids and (current["role"] == "super_admin" or person["tenantId"] == current["tenantId"]): person["scheduleId"] = schedule_id
-                save_config(config); return self.send_json(200, {"updated": len(ids)})
-            if parsed.path == "/dashboard/tenants":
-                if current["role"] != "super_admin": return self.send_json(403, {"error": "super_admin_required"})
-                tenant = {"id": re.sub(r"[^a-z0-9-]", "-", str(payload.get("id") or payload.get("name", "empresa")).lower()).strip("-"), "name": str(payload.get("name", "Empresa"))[:100], "kind": "customer", "status": "active", "peopleCount": 0, "deviceCount": 0}; config["tenants"].append(tenant); save_config(config); return self.send_json(201, tenant)
-            if parsed.path == "/dashboard/enrollments":
-                tenant_id = payload.get("tenantId", current["tenantId"]); token = secrets.token_urlsafe(32); enrollment = {"id": str(uuid.uuid4()), "tenantId": tenant_id, "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "createdAt": datetime.now(timezone.utc).isoformat(), "expiresAt": (datetime.now(timezone.utc)+timedelta(days=7)).isoformat()}; config["enrollments"].append(enrollment); save_config(config); return self.send_json(201, {"token": token, "tenantId": tenant_id, "serverUrl": "https://timewatcher.32-193-139-223.sslip.io"})
-            return self.send_json(404, {"error": "not_found"})
+            with _CONFIG_LOCK:
+                config = load_config()
+                if parsed.path == "/dashboard/invites":
+                    email = str(payload.get("email", "")).strip().lower(); role = payload.get("role", "member")
+                    role = "org_admin" if role in ("admin", "administrador", "org_admin") else "member"
+                    if "@" not in email or len(email) > 200: return self.send_json(400, {"error": "invalid_email"})
+                    token = secrets.token_urlsafe(32); now = datetime.now(timezone.utc)
+                    invite = {"email": email, "role": role, "tenantId": current["tenantId"], "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "createdAt": now.isoformat(), "expiresAt": (now + timedelta(days=7)).isoformat()}
+                    config["invites"] = [i for i in config["invites"] if i.get("email") != email] + [invite]; save_config(config)
+                    host = self.headers.get("Host") or urllib.parse.urlsplit(PUBLIC_URL).netloc
+                    return self.send_json(201, {"email": email, "role": role, "inviteUrl": f"https://{host}/?invite={token}"})
+                if parsed.path == "/dashboard/schedules":
+                    schedule = {"id": payload.get("id") or str(uuid.uuid4()), "tenantId": current["tenantId"], "name": str(payload.get("name", "Jornada"))[:80], "start": str(payload.get("start", "09:00"))[:5], "end": str(payload.get("end", "18:00"))[:5], "breakMinutes": max(0, int(payload.get("breakMinutes", 60))), "weekdays": payload.get("weekdays", [1,2,3,4,5])}
+                    config["schedules"] = [s for s in config["schedules"] if s["id"] != schedule["id"]] + [schedule]; save_config(config); return self.send_json(201, schedule)
+                if parsed.path == "/dashboard/people/schedule":
+                    ids = payload.get("personIds", []); schedule_id = payload.get("scheduleId")
+                    for person in config["people"]:
+                        if person["id"] in ids and (current["role"] == "super_admin" or person["tenantId"] == current["tenantId"]): person["scheduleId"] = schedule_id
+                    save_config(config); return self.send_json(200, {"updated": len(ids)})
+                if parsed.path == "/dashboard/tenants":
+                    if current["role"] != "super_admin": return self.send_json(403, {"error": "super_admin_required"})
+                    tenant = {"id": re.sub(r"[^a-z0-9-]", "-", str(payload.get("id") or payload.get("name", "empresa")).lower()).strip("-"), "name": str(payload.get("name", "Empresa"))[:100], "kind": "customer", "status": "active", "peopleCount": 0, "deviceCount": 0}; config["tenants"].append(tenant); save_config(config); return self.send_json(201, tenant)
+                if parsed.path == "/dashboard/enrollments":
+                    tenant_id = payload.get("tenantId", current["tenantId"]); token = secrets.token_urlsafe(32); enrollment = {"id": str(uuid.uuid4()), "tenantId": tenant_id, "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "createdAt": datetime.now(timezone.utc).isoformat(), "expiresAt": (datetime.now(timezone.utc)+timedelta(days=7)).isoformat()}; config["enrollments"].append(enrollment); save_config(config); return self.send_json(201, {"token": token, "tenantId": tenant_id, "serverUrl": "https://timewatcher.32-193-139-223.sslip.io"})
+                return self.send_json(404, {"error": "not_found"})
         if parsed.path not in ("/v1/screenshots", "/v1/activity-events"): return self.send_json(404, {"error": "not_found"})
         supplied = self.headers.get("Authorization", "")
         tenant_id = ingest_tenant(supplied[7:]) if supplied.startswith("Bearer ") else None
@@ -489,17 +520,19 @@ class Handler(BaseHTTPRequestHandler):
         except Exception: return self.send_json(400, {"error": "invalid_json"})
         token = str(payload.get("token", "")); password = str(payload.get("password", ""))
         if len(password) < 8: return self.send_json(400, {"error": "weak_password"})
-        digest = hashlib.sha256(token.encode()).hexdigest(); now = datetime.now(timezone.utc); config = load_config(); match = None
-        for invite in config["invites"]:
-            try:
-                if hmac.compare_digest(digest, invite["tokenHash"]) and parse_timestamp(invite["expiresAt"]) > now:
-                    match = invite; break
-            except (KeyError, ValueError): continue
-        if not match: return self.send_json(400, {"error": "invalid_invite"})
-        email = match["email"]
-        config["accounts"][email] = {"name": email.split("@")[0].replace(".", " ").replace("_", " ").title(), "role": match["role"], "tenantId": match.get("tenantId", "synova"), "status": "active", "pw": hash_password(password)}
-        config["invites"] = [i for i in config["invites"] if i.get("tokenHash") != match["tokenHash"]]; save_config(config)
-        account = config["accounts"][email]
+        digest = hashlib.sha256(token.encode()).hexdigest(); now = datetime.now(timezone.utc)
+        with _CONFIG_LOCK:
+            config = load_config(); match = None
+            for invite in config["invites"]:
+                try:
+                    if hmac.compare_digest(digest, invite["tokenHash"]) and parse_timestamp(invite["expiresAt"]) > now:
+                        match = invite; break
+                except (KeyError, ValueError): continue
+            if not match: return self.send_json(400, {"error": "invalid_invite"})
+            email = match["email"]
+            config["accounts"][email] = {"name": email.split("@")[0].replace(".", " ").replace("_", " ").title(), "role": match["role"], "tenantId": match.get("tenantId", "synova"), "status": "active", "pw": hash_password(password)}
+            config["invites"] = [i for i in config["invites"] if i.get("tokenHash") != match["tokenHash"]]; save_config(config)
+            account = config["accounts"][email]
         self.send_session(email, {"email": email, "name": account["name"], "role": account["role"], "tenantId": account["tenantId"]})
 
     def list_invites(self) -> None:
@@ -564,4 +597,4 @@ def bootstrap_admin() -> None:
 
 
 if __name__ == "__main__":
-    DATA_DIR.mkdir(parents=True, exist_ok=True); load_config(); bootstrap_admin(); ThreadingHTTPServer(("127.0.0.1", 5610), Handler).serve_forever()
+    DATA_DIR.mkdir(parents=True, exist_ok=True); load_config(); session_secret(); bootstrap_admin(); ThreadingHTTPServer(("127.0.0.1", 5610), Handler).serve_forever()
