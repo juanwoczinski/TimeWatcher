@@ -1,0 +1,21 @@
+[Unit]
+Description=WatchSynova authenticated screenshot ingestion
+After=network-online.target watchsynova.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=activitywatch
+Group=activitywatch
+EnvironmentFile=/etc/watchsynova/ingest.env
+ExecStart=/usr/bin/python3 /opt/watchsynova-agent/ingest_server.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/watchsynova-ingest
+
+[Install]
+WantedBy=multi-user.target
