@@ -13,6 +13,24 @@ type Section =
   | "Instaladores"
   | "Configurações";
 type Role = "super_admin" | "org_admin" | "manager" | "employee";
+type IconName =
+  | "overview"
+  | "companies"
+  | "people"
+  | "devices"
+  | "activity"
+  | "reports"
+  | "installers"
+  | "settings"
+  | "chevron";
+type Prefs = {
+  collapsed: boolean;
+  setCollapsed: (v: boolean) => void;
+  density: "comfortable" | "compact";
+  setDensity: (v: "comfortable" | "compact") => void;
+  period: Period;
+  setPeriod: (v: Period) => void;
+};
 type App = {
   name: string;
   seconds: number;
@@ -131,15 +149,15 @@ const labels: Record<Period, string> = {
   "30d": "Últimos 30 dias",
   custom: "Período personalizado",
 };
-const baseNav: { name: Section; icon: string }[] = [
-  { name: "Visão geral", icon: "◫" },
-  { name: "Empresas", icon: "E" },
-  { name: "Pessoas", icon: "P" },
-  { name: "Dispositivos", icon: "D" },
-  { name: "Atividades", icon: "A" },
-  { name: "Relatórios", icon: "R" },
-  { name: "Instaladores", icon: "↓" },
-  { name: "Configurações", icon: "⚙" },
+const baseNav: { name: Section; icon: IconName }[] = [
+  { name: "Visão geral", icon: "overview" },
+  { name: "Empresas", icon: "companies" },
+  { name: "Pessoas", icon: "people" },
+  { name: "Dispositivos", icon: "devices" },
+  { name: "Atividades", icon: "activity" },
+  { name: "Relatórios", icon: "reports" },
+  { name: "Instaladores", icon: "installers" },
+  { name: "Configurações", icon: "settings" },
 ];
 const desc: Record<Section, string> = {
   "Visão geral": "Produtividade, aderência e uso do tempo com dados reais.",
@@ -169,6 +187,207 @@ function date(v: string | null) {
     : "Sem sincronização";
 }
 
+// Real brand logos: resolve a domain for common apps, then use a favicon
+// service; sites use their own domain. Falls back to an initials badge.
+const APP_DOMAINS: Record<string, string> = {
+  "visual studio code": "visualstudio.com",
+  "vs code": "visualstudio.com",
+  vscode: "visualstudio.com",
+  code: "visualstudio.com",
+  "google chrome": "google.com",
+  chrome: "google.com",
+  "microsoft edge": "microsoft.com",
+  edge: "microsoft.com",
+  firefox: "mozilla.org",
+  safari: "apple.com",
+  slack: "slack.com",
+  figma: "figma.com",
+  notion: "notion.so",
+  terminal: "apple.com",
+  iterm: "iterm2.com",
+  iterm2: "iterm2.com",
+  zoom: "zoom.us",
+  "microsoft teams": "microsoft.com",
+  teams: "microsoft.com",
+  spotify: "spotify.com",
+  youtube: "youtube.com",
+  gmail: "gmail.com",
+  outlook: "outlook.com",
+  word: "microsoft.com",
+  excel: "microsoft.com",
+  powerpoint: "microsoft.com",
+  xcode: "apple.com",
+  docker: "docker.com",
+  postman: "postman.com",
+  discord: "discord.com",
+  whatsapp: "whatsapp.com",
+  telegram: "telegram.org",
+  github: "github.com",
+  gitkraken: "gitkraken.com",
+  "intellij idea": "jetbrains.com",
+  pycharm: "jetbrains.com",
+  webstorm: "jetbrains.com",
+  "sublime text": "sublimetext.com",
+  obsidian: "obsidian.md",
+  linear: "linear.app",
+  jira: "atlassian.com",
+  confluence: "atlassian.com",
+  trello: "trello.com",
+  chatgpt: "openai.com",
+  openai: "openai.com",
+  codex: "openai.com",
+  claude: "claude.ai",
+  anthropic: "anthropic.com",
+  canva: "canva.com",
+  photoshop: "adobe.com",
+  illustrator: "adobe.com",
+  adobe: "adobe.com",
+  finder: "apple.com",
+};
+function appDomain(name: string): string | null {
+  const k = name.trim().toLowerCase();
+  if (APP_DOMAINS[k]) return APP_DOMAINS[k];
+  for (const key of Object.keys(APP_DOMAINS))
+    if (k.includes(key)) return APP_DOMAINS[key];
+  return null;
+}
+function faviconUrl(domain: string) {
+  return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=64`;
+}
+function Glyph({
+  domain,
+  label,
+  kind = "app",
+}: {
+  domain: string | null;
+  label: string;
+  kind?: "app" | "site";
+}) {
+  const [failed, setFailed] = useState(false);
+  if (domain && !failed) {
+    return (
+      <span className={`glyph ${kind}`}>
+        <img
+          src={faviconUrl(domain)}
+          alt=""
+          loading="lazy"
+          onError={() => setFailed(true)}
+        />
+      </span>
+    );
+  }
+  return <i>{label.slice(0, 2).toUpperCase()}</i>;
+}
+function Icon({ name }: { name: IconName }) {
+  const p = {
+    viewBox: "0 0 24 24",
+    width: 18,
+    height: 18,
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.75,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+  };
+  switch (name) {
+    case "overview":
+      return (
+        <svg {...p}>
+          <rect x="3" y="3" width="7" height="9" rx="1" />
+          <rect x="14" y="3" width="7" height="5" rx="1" />
+          <rect x="14" y="12" width="7" height="9" rx="1" />
+          <rect x="3" y="16" width="7" height="5" rx="1" />
+        </svg>
+      );
+    case "companies":
+      return (
+        <svg {...p}>
+          <path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18" />
+          <path d="M2 22h20M10 6h4M10 10h4M10 14h4M10 18h4" />
+        </svg>
+      );
+    case "people":
+      return (
+        <svg {...p}>
+          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+          <circle cx="9" cy="7" r="4" />
+          <path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
+        </svg>
+      );
+    case "devices":
+      return (
+        <svg {...p}>
+          <rect x="2" y="3" width="20" height="14" rx="2" />
+          <path d="M8 21h8M12 17v4" />
+        </svg>
+      );
+    case "activity":
+      return (
+        <svg {...p}>
+          <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+        </svg>
+      );
+    case "reports":
+      return (
+        <svg {...p}>
+          <path d="M3 3v18h18" />
+          <path d="M8 17v-5M13 17V8M18 17v-8" />
+        </svg>
+      );
+    case "installers":
+      return (
+        <svg {...p}>
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <path d="M7 10l5 5 5-5M12 15V3" />
+        </svg>
+      );
+    case "settings":
+      return (
+        <svg {...p}>
+          <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" />
+        </svg>
+      );
+    case "chevron":
+      return (
+        <svg {...p}>
+          <path d="M11 17l-5-5 5-5M18 17l-5-5 5-5" />
+        </svg>
+      );
+  }
+}
+function OsLogo({ os }: { os: "apple" | "windows" | "deploy" }) {
+  if (os === "apple")
+    return (
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z" />
+      </svg>
+    );
+  if (os === "windows")
+    return (
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M3 5.1 10.4 4v7.3H3zm0 13.8 7.4 1v-7.2H3zM11.3 3.9 21 2.5v8.8h-9.7zm0 8.4H21v8.8l-9.7-1.4z" />
+      </svg>
+    );
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="30"
+      height="30"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="2" y="3" width="20" height="6" rx="1.5" />
+      <rect x="2" y="15" width="20" height="6" rx="1.5" />
+      <path d="M6 6h.01M6 18h.01" />
+    </svg>
+  );
+}
+
 export default function Dashboard() {
   const [active, setActive] = useState<Section>("Visão geral"),
     [period, setPeriod] = useState<Period>("today"),
@@ -178,6 +397,10 @@ export default function Dashboard() {
     [data, setData] = useState<Data | null>(null),
     [error, setError] = useState(""),
     [loading, setLoading] = useState(true);
+  const [collapsed, setCollapsed] = useState(false);
+  const [density, setDensity] = useState<"comfortable" | "compact">(
+    "comfortable",
+  );
   const load = useCallback(async () => {
     try {
       setError("");
@@ -207,12 +430,46 @@ export default function Dashboard() {
     const t = setInterval(load, 30000);
     return () => clearInterval(t);
   }, [load]);
+  useEffect(() => {
+    try {
+      if (localStorage.getItem("tw.collapsed") === "1") setCollapsed(true);
+      if (localStorage.getItem("tw.density") === "compact") setDensity("compact");
+      const p = localStorage.getItem("tw.period");
+      if (p === "today" || p === "7d" || p === "30d") setPeriod(p);
+    } catch {}
+  }, []);
   const nav = baseNav.filter(
     (n) => n.name !== "Empresas" || data?.viewer.role === "super_admin",
   );
   const tenantName = data?.tenant.name || "TeamWatcher";
+  const initials =
+    (data?.viewer.name || "TW")
+      .split(" ")
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((w) => w[0])
+      .join("")
+      .toUpperCase() || "TW";
+  const toggleSidebar = () =>
+    setCollapsed((v) => {
+      const nv = !v;
+      try {
+        localStorage.setItem("tw.collapsed", nv ? "1" : "0");
+      } catch {}
+      return nv;
+    });
+  const prefs: Prefs = {
+    collapsed,
+    setCollapsed,
+    density,
+    setDensity,
+    period,
+    setPeriod,
+  };
   return (
-    <main className="app-shell">
+    <main
+      className={`app-shell${collapsed ? " collapsed" : ""}${density === "compact" ? " dense" : ""}`}
+    >
       <aside className="sidebar">
         <div className="brand">
           <img src="/timewatcher-logo.png" alt="" />
@@ -238,17 +495,33 @@ export default function Dashboard() {
               key={n.name}
               className={active === n.name ? "active" : ""}
               onClick={() => setActive(n.name)}
+              title={n.name}
+              aria-current={active === n.name ? "page" : undefined}
             >
-              <span>{n.icon}</span>
-              {n.name}
+              <span className="nav-ico">
+                <Icon name={n.icon} />
+              </span>
+              <span className="nav-label">{n.name}</span>
               {n.name === "Dispositivos" && (
                 <b>{data?.summary.deviceCount ?? "—"}</b>
               )}
             </button>
           ))}
         </nav>
+        <button
+          className="rail-toggle"
+          onClick={toggleSidebar}
+          aria-label={collapsed ? "Expandir menu" : "Recolher menu"}
+          aria-expanded={!collapsed}
+          title={collapsed ? "Expandir" : "Recolher"}
+        >
+          <span className="nav-ico">
+            <Icon name="chevron" />
+          </span>
+          <span className="nav-label">Recolher</span>
+        </button>
         <div className="sidebar-foot">
-          <div className="avatar">TW</div>
+          <div className="avatar">{initials}</div>
           <div>
             <strong>{data?.viewer.name || "TeamWatcher"}</strong>
             <span>
@@ -336,6 +609,7 @@ export default function Dashboard() {
               end={end}
               tenant={tenant}
               reload={load}
+              prefs={prefs}
             />
           )
         )}
@@ -352,6 +626,7 @@ function Content({
   end,
   tenant,
   reload,
+  prefs,
 }: {
   active: Section;
   data: Data;
@@ -361,6 +636,7 @@ function Content({
   end: string;
   tenant: string;
   reload: () => void;
+  prefs: Prefs;
 }) {
   if (active === "Visão geral") return <Overview d={data} go={setActive} />;
   if (active === "Empresas") return <Companies d={data} reload={reload} />;
@@ -378,7 +654,7 @@ function Content({
       />
     );
   if (active === "Instaladores") return <Installers d={data} />;
-  return <Settings d={data} />;
+  return <Settings d={data} prefs={prefs} />;
 }
 function State({ text }: { text: string }) {
   return <div className="state-card">{text}</div>;
@@ -788,7 +1064,7 @@ function Activities({ d }: { d: Data }) {
         <div className="recent-list">
           {d.recent.map((x, i) => (
             <div key={`${x.timestamp}-${i}`}>
-              <span className="app-dot" />
+              <Glyph domain={appDomain(x.app)} label={x.app} kind="app" />
               <div>
                 <strong>{x.app}</strong>
                 <small>{x.title || "Sem título"}</small>
@@ -816,7 +1092,7 @@ function AppTable({ apps }: { apps: App[] }) {
         apps.map((a) => (
           <div className="app-row" key={a.name}>
             <span>
-              <i>{a.name.slice(0, 2).toUpperCase()}</i>
+              <Glyph domain={appDomain(a.name)} label={a.name} kind="app" />
               <strong>{a.name}</strong>
             </span>
             <span>
@@ -826,7 +1102,9 @@ function AppTable({ apps }: { apps: App[] }) {
             </span>
             <span>{a.duration}</span>
             <span className="share">
-              <b style={{ width: `${a.share}%` }} />
+              <span className="track">
+                <b style={{ width: `${Math.min(100, a.share)}%` }} />
+              </span>
               {a.share}%
             </span>
           </div>
@@ -849,8 +1127,11 @@ function UrlTable({ urls }: { urls: UrlUsage[] }) {
       {urls.map((u) => (
         <div className="url-row" key={u.url}>
           <span>
-            <strong>{u.domain}</strong>
-            <small>{u.title || u.url}</small>
+            <Glyph domain={u.domain} label={u.domain} kind="site" />
+            <span className="site-text">
+              <strong>{u.domain}</strong>
+              <small>{u.title || u.url}</small>
+            </span>
           </span>
           <span>
             <em className={`classification ${u.classification}`}>
@@ -1005,23 +1286,29 @@ function Installers({ d }: { d: Data }) {
       </div>
       <div className="install-grid">
         <article className="install-card">
-          <span>PKG</span>
+          <span className="os-badge apple">
+            <OsLogo os="apple" />
+          </span>
           <h2>macOS individual</h2>
           <p>Para enviar um link ao colaborador e instalar com assistente.</p>
           <a className="download" href="/downloads/TimeWatcher-macOS.pkg">
-            Baixar PKG
+            Baixar .pkg
           </a>
         </article>
         <article className="install-card">
-          <span>MSI</span>
+          <span className="os-badge windows">
+            <OsLogo os="windows" />
+          </span>
           <h2>Windows individual</h2>
           <p>Instalação com interface para o usuário final.</p>
           <a className="download" href="/downloads/TimeWatcher-Windows.msi">
-            Baixar MSI
+            Baixar .msi
           </a>
         </article>
         <article className="install-card ready">
-          <span>TI</span>
+          <span className="os-badge">
+            <OsLogo os="deploy" />
+          </span>
           <h2>Implantação em massa</h2>
           <p>
             Use o mesmo pacote com parâmetros silenciosos em Intune, GPO ou RMM.
@@ -1064,27 +1351,129 @@ function Installers({ d }: { d: Data }) {
     </div>
   );
 }
-function Settings({ d }: { d: Data }) {
+const ROLE_LABEL: Record<string, string> = {
+  super_admin: "Super admin · Synova",
+  org_admin: "Admin da organização",
+  manager: "Gestor",
+  employee: "Colaborador",
+};
+function persist(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {}
+}
+function Settings({ d, prefs }: { d: Data; prefs: Prefs }) {
+  const setPeriod = (v: Period) => {
+    prefs.setPeriod(v);
+    persist("tw.period", v);
+  };
+  const setDensity = (v: "comfortable" | "compact") => {
+    prefs.setDensity(v);
+    persist("tw.density", v);
+  };
+  const setCollapsed = (v: boolean) => {
+    prefs.setCollapsed(v);
+    persist("tw.collapsed", v ? "1" : "0");
+  };
   return (
     <div className="settings-grid">
       <article className="card">
-        <h2>Escopo</h2>
+        <h2>Conta</h2>
         <dl className="settings-list">
+          <div>
+            <dt>Nome</dt>
+            <dd>{d.viewer.name}</dd>
+          </div>
+          <div>
+            <dt>Usuário</dt>
+            <dd>{d.viewer.username}</dd>
+          </div>
+          <div>
+            <dt>Perfil</dt>
+            <dd>{ROLE_LABEL[d.viewer.role] || d.viewer.role}</dd>
+          </div>
           <div>
             <dt>Empresa</dt>
             <dd>{d.tenant.name}</dd>
           </div>
-          <div>
-            <dt>Perfil</dt>
-            <dd>{d.viewer.role}</dd>
+        </dl>
+      </article>
+      <article className="card">
+        <h2>Preferências</h2>
+        <p className="settings-copy">Salvas neste navegador.</p>
+        <div className="pref-list">
+          <div className="pref-row">
+            <div>
+              <strong>Período padrão</strong>
+              <span>Filtro aplicado ao abrir o painel</span>
+            </div>
+            <select
+              value={prefs.period === "custom" ? "today" : prefs.period}
+              onChange={(e) => setPeriod(e.target.value as Period)}
+            >
+              <option value="today">Hoje</option>
+              <option value="7d">7 dias</option>
+              <option value="30d">30 dias</option>
+            </select>
           </div>
+          <div className="pref-row">
+            <div>
+              <strong>Densidade</strong>
+              <span>Espaçamento da interface</span>
+            </div>
+            <div className="seg">
+              <button
+                className={prefs.density === "comfortable" ? "on" : ""}
+                onClick={() => setDensity("comfortable")}
+              >
+                Confortável
+              </button>
+              <button
+                className={prefs.density === "compact" ? "on" : ""}
+                onClick={() => setDensity("compact")}
+              >
+                Compacto
+              </button>
+            </div>
+          </div>
+          <div className="pref-row">
+            <div>
+              <strong>Menu lateral</strong>
+              <span>Estado padrão da barra de navegação</span>
+            </div>
+            <div className="seg">
+              <button
+                className={!prefs.collapsed ? "on" : ""}
+                onClick={() => setCollapsed(false)}
+              >
+                Expandido
+              </button>
+              <button
+                className={prefs.collapsed ? "on" : ""}
+                onClick={() => setCollapsed(true)}
+              >
+                Recolhido
+              </button>
+            </div>
+          </div>
+        </div>
+      </article>
+      <article className="card">
+        <h2>Coleta</h2>
+        <dl className="settings-list">
           <div>
             <dt>Aplicativos/janelas</dt>
             <dd>Ativo</dd>
           </div>
           <div>
-            <dt>URLs</dt>
+            <dt>URLs e sites</dt>
             <dd>{d.summary.urlCount ? "Ativo" : "Aguardando coletor web"}</dd>
+          </div>
+          <div>
+            <dt>Capturas de tela</dt>
+            <dd>
+              {d.summary.screenshotCount ? "Ativo" : "Sob consentimento"}
+            </dd>
           </div>
         </dl>
       </article>
