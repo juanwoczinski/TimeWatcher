@@ -1,4 +1,9 @@
 build
+# Keep the project-local vinext "sites" plugin that vite.config.ts imports.
+# Without this exception the generic `build` rule above swallows it, breaking
+# `vinext build` on every fresh checkout (CI + AWS deploy).
+!/timewatcher-platform/build/
+!/timewatcher-platform/build/**
 dist
 docs
 other
