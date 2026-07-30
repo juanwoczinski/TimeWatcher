@@ -63,7 +63,9 @@ wait_url() {
   return 1
 }
 wait_url http://127.0.0.1:5610/health
-wait_url 'http://127.0.0.1:5610/dashboard/data?period=today'
+# The dashboard API now requires an authenticated session; a healthy server
+# rejects anonymous access with 401 instead of serving data.
+test "\$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:5610/dashboard/data?period=today')" = "401"
 wait_url http://127.0.0.1:3110/
 rm -rf '$REMOTE_STAGE'
 REMOTE
