@@ -10,6 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var modules: [Process] = []
     private var accessibilityModulesStarted = false
     private var accessibilityTimer: Timer?
+    private var screenCaptureAuthorized = false
+    private let screenPromptKey = "timewatcher.screenCapturePromptRequested"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -32,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Open Local Dashboard", action: #selector(openLocalDashboard), keyEquivalent: "l"))
         menu.addItem(NSMenuItem(title: "Open Cloud Dashboard", action: #selector(openCloudDashboard), keyEquivalent: "d"))
+        menu.addItem(NSMenuItem(title: "Screen Recording Settings…", action: #selector(openScreenRecordingSettings), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit TimeWatcher", action: #selector(quit), keyEquivalent: "q"))
         item.menu = menu
@@ -39,12 +42,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func requestPermissionAndStart() {
-        let authorized = CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess()
-        setStatus(authorized ? "Monitoring and secure sync enabled" : "Sync enabled — screen permission required")
-        runAgent(captureScreen: authorized)
-        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            self?.runAgent(captureScreen: authorized)
+        screenCaptureAuthorized = CGPreflightScreenCaptureAccess()
+        if !screenCaptureAuthorized && !UserDefaults.standard.bool(forKey: screenPromptKey) {
+            UserDefaults.standard.set(true, forKey: screenPromptKey)
+            screenCaptureAuthorized = CGRequestScreenCaptureAccess()
         }
+        runSyncCycle()
+        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.runSyncCycle()
+        }
+    }
+
+    private func runSyncCycle() {
+        screenCaptureAuthorized = CGPreflightScreenCaptureAccess()
+        setStatus(screenCaptureAuthorized ? "Monitoring and secure sync enabled" : "Activity sync enabled — allow Screen Recording")
+        runAgent(captureScreen: screenCaptureAuthorized)
     }
 
     private func runAgent(captureScreen: Bool) {
@@ -116,6 +128,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openCloudDashboard() {
         NSWorkspace.shared.open(URL(string: "https://timewatcher.32-193-139-223.sslip.io")!)
+    }
+
+    @objc private func openScreenRecordingSettings() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
     }
 
     @objc private func quit() {
