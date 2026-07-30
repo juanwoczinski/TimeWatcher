@@ -1,0 +1,23 @@
+[Unit]
+Description=TimeWatcher multi-tenant dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=timewatcher-platform
+Group=timewatcher-platform
+WorkingDirectory=/opt/timewatcher-platform
+Environment=NODE_ENV=production
+Environment=PORT=3110
+ExecStart=/usr/bin/npm run start
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/timewatcher-platform
+
+[Install]
+WantedBy=multi-user.target

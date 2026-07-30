@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import tempfile
 import urllib.error
 import urllib.parse
@@ -47,6 +48,29 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/health":
             self.send_json(200, {"status": "ok"})
+        elif self.path == "/dashboard/screenshots":
+            items = []
+            for path in sorted((DATA_DIR / "screenshots").glob("*/*.jpg"), key=lambda p: p.stat().st_mtime, reverse=True)[:100]:
+                stat = path.stat()
+                items.append({"id": path.stem, "capturedAt": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                              "size": stat.st_size, "url": f"/platform-api/dashboard/screenshots/{path.stem}"})
+            self.send_json(200, {"items": items})
+        elif self.path.startswith("/dashboard/screenshots/"):
+            image_id = self.path.rsplit("/", 1)[-1]
+            if not re.fullmatch(r"[0-9a-f-]{36}", image_id):
+                self.send_json(400, {"error": "invalid_id"})
+                return
+            matches = list((DATA_DIR / "screenshots").glob(f"*/{image_id}.jpg"))
+            if not matches:
+                self.send_json(404, {"error": "not_found"})
+                return
+            image = matches[0].read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Cache-Control", "private, max-age=300")
+            self.send_header("Content-Length", str(len(image)))
+            self.end_headers()
+            self.wfile.write(image)
         else:
             self.send_json(404, {"error": "not_found"})
 

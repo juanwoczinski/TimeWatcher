@@ -5,15 +5,22 @@ timewatcher.32-193-139-223.sslip.io {
 			reverse_proxy 127.0.0.1:5610
 		}
 
+		handle /platform-api/* {
+			basic_auth {
+				timewatcher $2a$14$XQx/qUSClTYcgba8iZMn9uoLB/lRGgnSeWqhUgwMWZlKLOl9Hg5IK
+				timewatcher2 $2a$14$CEb.lIU55mNBn.IawRx1suE9oFL.j6sSfTMt7Tr4SchzM9hQvnJpq
+			}
+			uri strip_prefix /platform-api
+			reverse_proxy 127.0.0.1:5610
+		}
+
 		handle {
 			basic_auth {
 				timewatcher $2a$14$XQx/qUSClTYcgba8iZMn9uoLB/lRGgnSeWqhUgwMWZlKLOl9Hg5IK
 				timewatcher2 $2a$14$CEb.lIU55mNBn.IawRx1suE9oFL.j6sSfTMt7Tr4SchzM9hQvnJpq
 			}
 
-			reverse_proxy 127.0.0.1:5600 {
-				header_up Host 127.0.0.1:5600
-			}
+			reverse_proxy 127.0.0.1:3110
 		}
 	}
 }
