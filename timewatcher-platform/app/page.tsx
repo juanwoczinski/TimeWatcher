@@ -210,14 +210,14 @@ export default function Dashboard() {
   const nav = baseNav.filter(
     (n) => n.name !== "Empresas" || data?.viewer.role === "super_admin",
   );
-  const tenantName = data?.tenant.name || "TimeWatcher";
+  const tenantName = data?.tenant.name || "TeamWatcher";
   return (
     <main className="app-shell">
       <aside className="sidebar">
         <div className="brand">
           <img src="/timewatcher-logo.png" alt="" />
           <div>
-            <strong>TimeWatcher</strong>
+            <strong>TeamWatcher</strong>
             <span>Inteligência do tempo</span>
           </div>
         </div>
@@ -250,7 +250,7 @@ export default function Dashboard() {
         <div className="sidebar-foot">
           <div className="avatar">TW</div>
           <div>
-            <strong>{data?.viewer.name || "TimeWatcher"}</strong>
+            <strong>{data?.viewer.name || "TeamWatcher"}</strong>
             <span>
               {data?.viewer.role === "super_admin"
                 ? "Super admin Synova"

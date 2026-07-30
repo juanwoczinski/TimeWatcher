@@ -1,8 +1,8 @@
-# TimeWatcher brand
+# TeamWatcher brand
 
-TimeWatcher is represented by the `TW` monogram inside a time arc with an
-activity pulse. The mark combines time awareness, continuous observation and
-measurable activity without reusing ActivityWatch artwork.
+TeamWatcher is represented by a striped gradient globe (cyan-to-violet) with the
+`TEAMWATCHER by Synova IT` wordmark. The mark conveys continuous, worldwide team
+observation and measurable activity without reusing ActivityWatch artwork.
 
 ## Core palette
 
@@ -14,7 +14,7 @@ measurable activity without reusing ActivityWatch artwork.
 
 ## Product naming
 
-- Full name: `TimeWatcher`
+- Full name: `TeamWatcher`
 - Menu-bar abbreviation: `TW`
 - Bundle identifier: `com.timewatcher.app`
 - Event type: `timewatcher.screenshot`

@@ -1,8 +1,8 @@
-# Plano de produto — TimeWatcher
+# Plano de produto — TeamWatcher
 
 ## Direção
 
-O TimeWatcher será uma plataforma multiempresa de inteligência sobre o uso do
+O TeamWatcher será uma plataforma multiempresa de inteligência sobre o uso do
 tempo. Nesta fase, todos os indicadores são apresentados em duração e
 percentual. Valores financeiros e gravação contínua de tela em HD ficam fora do
 escopo.

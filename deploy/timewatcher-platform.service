@@ -1,5 +1,5 @@
 [Unit]
-Description=TimeWatcher multi-tenant dashboard
+Description=TeamWatcher multi-tenant dashboard
 After=network-online.target
 Wants=network-online.target
 

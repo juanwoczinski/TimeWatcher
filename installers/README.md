@@ -1,4 +1,4 @@
-# Instaladores TimeWatcher
+# Instaladores TeamWatcher
 
 - `macos/build-pkg.sh`: gera o PKG universal de distribuição. No primeiro uso,
   o agente solicita o código temporário criado no console e passa a pertencer ao

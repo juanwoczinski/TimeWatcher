@@ -32,7 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            let token = object["token"] as? String, !token.isEmpty { return true }
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "Ativar TimeWatcher"
+        alert.messageText = "Ativar TeamWatcher"
         alert.informativeText = "Cole o código de ativação fornecido pelo administrador da sua empresa."
         alert.addButton(withTitle: "Ativar")
         alert.addButton(withTitle: "Cancelar")
@@ -51,9 +51,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func configureStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = "TW"
-        item.button?.toolTip = "TimeWatcher"
+        item.button?.toolTip = "TeamWatcher"
         let menu = NSMenu()
-        let name = NSMenuItem(title: "TimeWatcher", action: nil, keyEquivalent: "")
+        let name = NSMenuItem(title: "TeamWatcher", action: nil, keyEquivalent: "")
         name.isEnabled = false
         menu.addItem(name)
         let status = NSMenuItem(title: "Starting monitoring and sync…", action: nil, keyEquivalent: "")
@@ -64,7 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Open Cloud Dashboard", action: #selector(openCloudDashboard), keyEquivalent: "d"))
         menu.addItem(NSMenuItem(title: "Screen Recording Settings…", action: #selector(openScreenRecordingSettings), keyEquivalent: ""))
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit TimeWatcher", action: #selector(quit), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: "Quit TeamWatcher", action: #selector(quit), keyEquivalent: "q"))
         item.menu = menu
         statusItem = item
     }

@@ -6,13 +6,13 @@ const geist = Geist({ variable: "--font-sans", subsets: ["latin"] });
 const mono = Geist_Mono({ variable: "--font-mono", subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "TimeWatcher — Work Intelligence",
+  title: "TeamWatcher — Work Intelligence",
   description: "Gestão de produtividade, dispositivos e políticas de trabalho para equipes.",
   icons: { icon: "/timewatcher-logo.png", shortcut: "/timewatcher-logo.png" },
   openGraph: {
-    title: "TimeWatcher — Work Intelligence",
+    title: "TeamWatcher — Work Intelligence",
     description: "Produtividade com contexto.",
-    images: [{ url: "/timewatcher-social.png", width: 1200, height: 630, alt: "TimeWatcher" }],
+    images: [{ url: "/timewatcher-social.png", width: 1200, height: 630, alt: "TeamWatcher" }],
   },
 };
 

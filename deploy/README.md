@@ -1,4 +1,4 @@
-# TimeWatcher deployment
+# TeamWatcher deployment
 
 The AWS deployment runs the official ActivityWatch v0.13.2 Linux release as a
 systemd service. The server binds only to `127.0.0.1:5600` because ActivityWatch

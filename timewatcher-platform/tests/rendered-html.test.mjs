@@ -11,12 +11,12 @@ async function render() {
   }, { waitUntil() {}, passThroughOnException() {} });
 }
 
-test("server-renders the TimeWatcher product shell", async () => {
+test("server-renders the TeamWatcher product shell", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
-  assert.match(html, /<title>TimeWatcher — Work Intelligence<\/title>/i);
+  assert.match(html, /<title>TeamWatcher — Work Intelligence<\/title>/i);
   assert.match(html, /Inteligência do tempo/);
   assert.match(html, /Visão geral/);
   assert.match(html, /Pessoas/);
@@ -40,5 +40,5 @@ test("loads operational data from the protected platform API", async () => {
   assert.match(page, /URLs e sites acessados/);
   assert.match(page, /setInterval\(load,\s*30000\)/);
   assert.doesNotMatch(page, /const people\s*=|const captures\s*=/);
-  assert.match(layout, /title:\s*"TimeWatcher — Work Intelligence"/);
+  assert.match(layout, /title:\s*"TeamWatcher — Work Intelligence"/);
 });
