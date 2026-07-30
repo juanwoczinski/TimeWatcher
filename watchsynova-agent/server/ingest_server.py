@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Authenticated, write-only screenshot ingestion for WatchSynova."""
+"""Authenticated, write-only ingestion for TimeWatcher."""
 
 import hashlib
 import hmac
@@ -34,7 +34,7 @@ def aw_request(method: str, path: str, payload: object) -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "WatchSynovaIngest/1"
+    server_version = "TimeWatcherIngest/1"
 
     def send_json(self, status: int, payload: object) -> None:
         body = json.dumps(payload).encode()
@@ -51,12 +51,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(404, {"error": "not_found"})
 
     def do_POST(self) -> None:
-        if self.path != "/v1/screenshots":
+        if self.path not in ("/v1/screenshots", "/v1/activity-events"):
             self.send_json(404, {"error": "not_found"})
             return
         supplied = self.headers.get("Authorization", "")
         if not supplied.startswith("Bearer ") or not hmac.compare_digest(supplied[7:], TOKEN):
             self.send_json(401, {"error": "unauthorized"})
+            return
+        if self.path == "/v1/activity-events":
+            self.receive_activity_events()
             return
         if self.headers.get_content_type() != "image/jpeg":
             self.send_json(415, {"error": "jpeg_required"})
@@ -91,10 +94,10 @@ class Handler(BaseHTTPRequestHandler):
         temporary_path.replace(target)
 
         digest = hashlib.sha256(image).hexdigest()
-        bucket_id = f"watchsynova-screenshot_{device}".replace("/", "_")
+        bucket_id = f"timewatcher-screenshot_{device}".replace("/", "_")
         try:
             aw_request("POST", f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}", {
-                "id": bucket_id, "type": "watchsynova.screenshot", "client": "watchsynova-agent",
+                "id": bucket_id, "type": "timewatcher.screenshot", "client": "timewatcher-agent",
                 "hostname": device, "data": {},
             })
             aw_request("POST", f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}/events", [{
@@ -107,6 +110,48 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(502, {"error": "metadata_write_failed"})
             return
         self.send_json(201, {"id": image_id, "sha256": digest})
+
+    def receive_activity_events(self) -> None:
+        if self.headers.get_content_type() != "application/json":
+            self.send_json(415, {"error": "json_required"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if not 2 <= length <= 5 * 1024 * 1024:
+            self.send_json(413, {"error": "invalid_size"})
+            return
+        try:
+            payload = json.loads(self.rfile.read(length))
+            bucket = payload["bucket"]
+            bucket_id = str(bucket["id"])[:300].replace("/", "_")
+            events = payload["events"]
+            if not isinstance(events, list) or len(events) > 1000:
+                raise ValueError("invalid events")
+            clean_events = []
+            for event in events:
+                clean_events.append({
+                    "timestamp": str(event["timestamp"]),
+                    "duration": float(event.get("duration", 0)),
+                    "data": dict(event.get("data", {})),
+                })
+            aw_request("POST", f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}", {
+                "id": bucket_id,
+                "type": str(bucket.get("type", "unknown"))[:200],
+                "client": str(bucket.get("client", "timewatcher"))[:200],
+                "hostname": str(bucket.get("hostname", "unknown"))[:200],
+                "data": dict(bucket.get("data", {})),
+            })
+            if clean_events:
+                aw_request("POST", f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}/events", clean_events)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            self.send_json(400, {"error": "invalid_payload"})
+            return
+        except Exception:
+            self.send_json(502, {"error": "activity_write_failed"})
+            return
+        self.send_json(201, {"bucket": bucket_id, "accepted": len(clean_events)})
 
     def log_message(self, fmt: str, *args: object) -> None:
         print(f"{self.address_string()} - {fmt % args}", flush=True)

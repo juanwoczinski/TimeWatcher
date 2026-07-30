@@ -1,9 +1,9 @@
-# WatchSynova screenshot agent
+# TimeWatcher agent
 
-This opt-in extension captures the main macOS display at a configurable interval
+TimeWatcher is a single menu-bar application that manages ActivityWatch-compatible
+collectors, captures the main macOS display at a configurable interval,
 and uploads JPEG images to a write-only endpoint over HTTPS. It is designed to
-run alongside ActivityWatch and records screenshot metadata in a
-`watchsynova.screenshot` bucket.
+and records screenshot metadata in a `timewatcher.screenshot` bucket.
 
 ## Privacy and consent
 
@@ -18,7 +18,8 @@ run alongside ActivityWatch and records screenshot metadata in a
 ## Components
 
 - `macos/watchsynova_screenshot_agent.py`: capture, retry queue and upload.
-- `macos/WatchSynovaCapture.swift`: native consent prompt and visible menu-bar app.
+- `macos/WatchSynovaCapture.swift`: native `TW` menu, collector lifecycle,
+  consent prompt, screenshot capture and secure cloud synchronization.
 - `macos/com.watchsynova.screenshot-agent.plist`: per-user background service.
 - `server/ingest_server.py`: authenticated, size-limited JPEG receiver.
 - `server/watchsynova-ingest.service`: hardened systemd service.
@@ -34,12 +35,12 @@ download route in this first version.
 Stop the background agent:
 
 ```sh
-launchctl bootout gui/$(id -u)/com.watchsynova.screenshot-agent
+launchctl bootout gui/$(id -u)/com.timewatcher.app
 ```
 
 Start it again:
 
 ```sh
 launchctl bootstrap gui/$(id -u) \
-  "$HOME/Library/LaunchAgents/com.watchsynova.screenshot-agent.plist"
+  "$HOME/Library/LaunchAgents/com.timewatcher.app.plist"
 ```

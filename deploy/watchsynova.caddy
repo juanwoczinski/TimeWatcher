@@ -1,4 +1,4 @@
-watchsynova.32-193-139-223.sslip.io {
+timewatcher.32-193-139-223.sslip.io {
 	route {
 		handle /ingest/* {
 			uri strip_prefix /ingest
@@ -7,7 +7,7 @@ watchsynova.32-193-139-223.sslip.io {
 
 		handle {
 			basic_auth {
-				watchsynova $2a$14$XQx/qUSClTYcgba8iZMn9uoLB/lRGgnSeWqhUgwMWZlKLOl9Hg5IK
+				timewatcher $2a$14$XQx/qUSClTYcgba8iZMn9uoLB/lRGgnSeWqhUgwMWZlKLOl9Hg5IK
 			}
 
 			reverse_proxy 127.0.0.1:5600 {
