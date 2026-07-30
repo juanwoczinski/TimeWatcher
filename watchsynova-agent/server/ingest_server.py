@@ -193,7 +193,9 @@ class Handler(BaseHTTPRequestHandler):
             for path in sorted((DATA_DIR / "screenshots").glob("*/*.jpg"), key=lambda p: p.stat().st_mtime, reverse=True)[:100]:
                 stat = path.stat()
                 items.append({"id": path.stem, "capturedAt": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
-                              "size": stat.st_size, "url": f"/platform-api/dashboard/screenshots/{path.stem}", **metadata.get(path.stem, {})})
+                              "size": stat.st_size, "url": f"/platform-api/dashboard/screenshots/{path.stem}",
+                              "personId": "juan-kleber", "personName": OWNER_NAME,
+                              **metadata.get(path.stem, {})})
             self.send_json(200, {"items": items})
         elif parsed.path.startswith("/dashboard/screenshots/"):
             image_id = parsed.path.rsplit("/", 1)[-1]

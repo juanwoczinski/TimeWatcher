@@ -14,7 +14,8 @@ escopo.
 - Contagem de teclado e mouse sem registrar o conteúdo digitado.
 - Inventário e estado de sincronização do dispositivo.
 - Capturas periódicas mediante consentimento do usuário.
-- Visões reais de resumo, pessoas, dispositivos, aplicativos e capturas.
+- Visões reais de resumo, pessoas, dispositivos e aplicativos. As capturas não
+  são um módulo separado: pertencem ao colaborador e ao host que as originou.
 - Filtros de hoje, sete dias e trinta dias.
 - Sincronização offline com reenvio posterior pelo agente.
 - Deploy repetível sem depender de IA.
