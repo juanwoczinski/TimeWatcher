@@ -415,6 +415,85 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     }
 
 
+def people_directory(params: dict, current_viewer: dict) -> dict:
+    """Real people directory: one monitored person per telemetry host, with
+    per-person metrics merged with persistent metadata (name/team/schedule)."""
+    start, end, period = bounds(params)
+    config = load_config()
+    tenant_id = params.get("tenant", [current_viewer["tenantId"]])[0] if current_viewer["role"] == "super_admin" else current_viewer["tenantId"]
+    buckets = aw_get("/api/0/buckets/")
+    def belongs(bucket_id: str) -> bool:
+        return bucket_id.startswith(f"tw-{tenant_id}_") if tenant_id != "synova" else not bucket_id.startswith("tw-") or bucket_id.startswith("tw-synova_")
+    buckets = {key: value for key, value in buckets.items() if belongs(key)}
+
+    hosts: dict = {}
+    for bucket_id, bucket in buckets.items():
+        host = bucket.get("hostname") or "Dispositivo desconhecido"
+        slot = hosts.setdefault(host, {"window": [], "afk": [], "input": [], "lastSeen": None})
+        btype = bucket.get("type")
+        if btype == "currentwindow": slot["window"].append(bucket_id)
+        elif btype == "afkstatus": slot["afk"].append(bucket_id)
+        elif btype == "os.hid.input": slot["input"].append(bucket_id)
+        last_value = bucket.get("last_updated") or bucket.get("created")
+        if last_value:
+            last_dt = parse_timestamp(last_value)
+            slot["lastSeen"] = last_dt if slot["lastSeen"] is None else max(slot["lastSeen"], last_dt)
+
+    def events_for(bucket_id: str) -> list:
+        query = urllib.parse.urlencode({"start": start.isoformat(), "end": end.isoformat(), "limit": 10000})
+        return aw_get(f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}/events?{query}")
+
+    meta_by_key: dict = {}
+    for person in config.get("people", []):
+        if person.get("tenantId") != tenant_id: continue
+        meta_by_key[person.get("host") or person.get("id")] = person
+
+    people = []
+    for host, slot in sorted(hosts.items()):
+        app_seconds: dict = defaultdict(float); tracked = 0.0
+        for bucket_id in slot["window"]:
+            for event in events_for(bucket_id):
+                seconds = max(0.0, float(event.get("duration", 0)))
+                app = str(event.get("data", {}).get("app", "Não identificado")) or "Não identificado"
+                app_seconds[app] += seconds; tracked += seconds
+        productive = sum(seconds for app, seconds in app_seconds.items() if classify(app) == "productive")
+        idle = 0.0
+        for bucket_id in slot["afk"]:
+            for event in events_for(bucket_id):
+                if event.get("data", {}).get("status") == "afk": idle += max(0.0, float(event.get("duration", 0)))
+        presses = clicks = 0
+        for bucket_id in slot["input"]:
+            for event in events_for(bucket_id):
+                presses += int(event.get("data", {}).get("presses", 0)); clicks += int(event.get("data", {}).get("clicks", 0))
+        active = max(0.0, tracked - min(idle, tracked))
+        pid = re.sub(r"[^a-z0-9-]", "-", host.lower()).strip("-") or "host"
+        meta = meta_by_key.get(host) or meta_by_key.get(pid) or {}
+        last_seen = slot["lastSeen"]
+        online = bool(last_seen and (end - last_seen).total_seconds() < 300)
+        top_apps = sorted(app_seconds.items(), key=lambda item: item[1], reverse=True)[:6]
+        people.append({
+            "id": pid, "host": host,
+            "name": meta.get("name") or host.replace(".local", ""),
+            "title": meta.get("title") or "Colaborador",
+            "teamId": meta.get("teamId"), "scheduleId": meta.get("scheduleId"),
+            "device": host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop",
+            "status": "online" if online else "offline", "lastSeen": last_seen.isoformat() if last_seen else None,
+            "trackedSeconds": round(tracked, 3), "activeSeconds": round(active, 3), "idleSeconds": round(idle, 3),
+            "productiveSeconds": round(productive, 3), "focusScore": round(productive / tracked * 100 if tracked else 0),
+            "presses": presses, "clicks": clicks,
+            "topApps": [{"name": app, "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": classify(app)} for app, seconds in top_apps],
+        })
+    people.sort(key=lambda person: (person["status"] != "online", person["name"].lower()))
+    tenant = next((t for t in config["tenants"] if t["id"] == tenant_id), {"id": tenant_id, "name": tenant_id})
+    return {
+        "tenant": tenant, "generatedAt": datetime.now(timezone.utc).isoformat(), "period": period,
+        "range": {"start": start.isoformat(), "end": end.isoformat()}, "people": people,
+        "schedules": [s for s in config["schedules"] if s["tenantId"] == tenant_id],
+        "teams": [t for t in config.get("teams", []) if t.get("tenantId") == tenant_id],
+        "counts": {"people": len(people), "online": sum(1 for p in people if p["status"] == "online")},
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "TimeWatcher/2"
 
@@ -444,6 +523,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/dashboard/data":
             try: return self.send_json(200, dashboard_data(params, current))
             except Exception as error: return self.send_json(502, {"error": "dashboard_unavailable", "detail": str(error)[:240]})
+        if parsed.path == "/dashboard/people":
+            try: return self.send_json(200, people_directory(params, current))
+            except Exception as error: return self.send_json(502, {"error": "people_unavailable", "detail": str(error)[:240]})
         if parsed.path in ("/dashboard/export.csv", "/dashboard/export.json"):
             try: data = dashboard_data(params, current)
             except Exception as error: return self.send_json(502, {"error": "export_unavailable", "detail": str(error)[:240]})
@@ -494,6 +576,20 @@ class Handler(BaseHTTPRequestHandler):
                     for person in config["people"]:
                         if person["id"] in ids and (current["role"] == "super_admin" or person["tenantId"] == current["tenantId"]): person["scheduleId"] = schedule_id
                     save_config(config); return self.send_json(200, {"updated": len(ids)})
+                if parsed.path == "/dashboard/people":
+                    host = str(payload.get("host") or payload.get("id") or "").strip()
+                    if not host: return self.send_json(400, {"error": "host_required"})
+                    pid = re.sub(r"[^a-z0-9-]", "-", host.lower()).strip("-") or "host"
+                    p_tenant = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
+                    people = config.setdefault("people", [])
+                    entry = next((p for p in people if p.get("tenantId") == p_tenant and (p.get("host") == host or p.get("id") == pid)), None)
+                    if entry is None:
+                        entry = {"id": pid, "tenantId": p_tenant, "host": host}; people.append(entry)
+                    for field in ("name", "title"):
+                        if payload.get(field) is not None: entry[field] = str(payload[field])[:120]
+                    for field in ("teamId", "scheduleId"):
+                        if field in payload: entry[field] = payload[field] or None
+                    save_config(config); audit("person.update", current["email"], {"id": pid}); return self.send_json(200, entry)
                 if parsed.path == "/dashboard/tenants":
                     if current["role"] != "super_admin": return self.send_json(403, {"error": "super_admin_required"})
                     tenant = {"id": re.sub(r"[^a-z0-9-]", "-", str(payload.get("id") or payload.get("name", "empresa")).lower()).strip("-"), "name": str(payload.get("name", "Empresa"))[:100], "kind": "customer", "status": "active", "peopleCount": 0, "deviceCount": 0}; config["tenants"].append(tenant); save_config(config); audit("tenant.create", current["email"], {"id": tenant["id"]}); return self.send_json(201, tenant)

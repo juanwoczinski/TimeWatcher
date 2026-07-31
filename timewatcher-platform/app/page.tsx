@@ -1115,82 +1115,314 @@ function Companies({ d, reload }: { d: Data; reload: () => void }) {
     </div>
   );
 }
+type DirPerson = {
+  id: string;
+  host: string;
+  name: string;
+  title: string;
+  teamId: string | null;
+  scheduleId: string | null;
+  device: string;
+  platform: string;
+  status: "online" | "offline";
+  lastSeen: string | null;
+  trackedSeconds: number;
+  activeSeconds: number;
+  idleSeconds: number;
+  productiveSeconds: number;
+  focusScore: number;
+  presses: number;
+  clicks: number;
+  topApps: {
+    name: string;
+    seconds: number;
+    duration: string;
+    classification: App["classification"];
+  }[];
+};
+type Directory = {
+  tenant: Tenant;
+  people: DirPerson[];
+  schedules: Schedule[];
+  teams: { id: string; name: string }[];
+  counts: { people: number; online: number };
+};
+function initials(name: string) {
+  return (
+    (name.match(/\b\p{L}/gu) || []).slice(0, 2).join("").toUpperCase() || "?"
+  );
+}
 function People({ d, reload }: { d: Data; reload: () => void }) {
-  const p = d.person,
-    [schedule, setSchedule] = useState(
-      p.scheduleId || d.schedules[0]?.id || "",
+  const [dir, setDir] = useState<Directory | null>(null);
+  const [q, setQ] = useState("");
+  const [selected, setSelected] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const canEdit =
+    d.viewer.role === "super_admin" || d.viewer.role === "org_admin";
+
+  const load = useCallback(async () => {
+    const res = await fetch(`/platform-api/dashboard/people?period=${d.period}`);
+    if (res.ok) setDir(await res.json());
+  }, [d.period]);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const teamName = (id: string | null) =>
+    (id && dir?.teams.find((t) => t.id === id)?.name) || "Sem time";
+  const people = (dir?.people || []).filter((person) => {
+    const t = q.trim().toLowerCase();
+    return (
+      !t ||
+      person.name.toLowerCase().includes(t) ||
+      person.host.toLowerCase().includes(t) ||
+      teamName(person.teamId).toLowerCase().includes(t)
     );
-  async function apply() {
-    await fetch("/platform-api/dashboard/people/schedule", {
+  });
+  const current = people.find((person) => person.id === selected) || null;
+
+  async function save(person: DirPerson, patch: Partial<DirPerson>) {
+    setSaving(true);
+    await fetch("/platform-api/dashboard/people", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        personIds: d.people.map((x) => x.id),
-        scheduleId: schedule,
-      }),
+      body: JSON.stringify({ host: person.host, id: person.id, ...patch }),
     });
+    setSaving(false);
+    setEditing(null);
+    await load();
     reload();
   }
-  const device = d.devices[0];
+
   return (
     <div className="page-stack">
-      <article className="card data-card">
-        <div className="card-head">
-          <div>
-            <h2>{p.name}</h2>
-            <p>{p.role} · dados dos ativos atribuídos</p>
+      <div className="people-toolbar">
+        <div className="section-summary">
+          <strong>
+            {dir?.counts.people ?? 0} colaborador(es) monitorado(s)
+          </strong>
+          <span>
+            {dir?.counts.online ?? 0} online agora · diretório derivado da
+            telemetria real do agente.
+          </span>
+        </div>
+        <input
+          className="people-search"
+          placeholder="Buscar por nome, dispositivo ou time…"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+      </div>
+      {!dir ? (
+        <State text="Carregando diretório…" />
+      ) : people.length === 0 ? (
+        <State text="Nenhum colaborador com telemetria neste período." />
+      ) : (
+        <div className="roster">
+          {people.map((person) => (
+            <article
+              key={person.id}
+              className={`person-card${selected === person.id ? " selected" : ""}`}
+              onClick={() =>
+                setSelected(selected === person.id ? null : person.id)
+              }
+            >
+              <div className="person-head">
+                <div className="avatar">{initials(person.name)}</div>
+                <div className="person-meta">
+                  <strong>{person.name}</strong>
+                  <small>
+                    {person.device} · {teamName(person.teamId)}
+                  </small>
+                </div>
+                <span className={`pill ${person.status}`}>{person.status}</span>
+              </div>
+              <dl className="person-stats">
+                <div>
+                  <dt>Monitorado</dt>
+                  <dd>{duration(person.trackedSeconds)}</dd>
+                </div>
+                <div>
+                  <dt>Ativo</dt>
+                  <dd>{duration(person.activeSeconds)}</dd>
+                </div>
+                <div>
+                  <dt>Foco</dt>
+                  <dd>{person.focusScore}%</dd>
+                </div>
+                <div>
+                  <dt>Visto</dt>
+                  <dd>{date(person.lastSeen)}</dd>
+                </div>
+              </dl>
+            </article>
+          ))}
+        </div>
+      )}
+      {current && (
+        <article className="card data-card">
+          <div className="card-head">
+            <div>
+              <h2>{current.name}</h2>
+              <p>
+                {current.title} · {current.device} · {teamName(current.teamId)}
+              </p>
+            </div>
+            <div className="head-actions">
+              <span className={`pill ${current.status}`}>{current.status}</span>
+              {canEdit && (
+                <button
+                  className="btn ghost"
+                  onClick={() =>
+                    setEditing(editing === current.id ? null : current.id)
+                  }
+                >
+                  {editing === current.id ? "Fechar" : "Editar"}
+                </button>
+              )}
+            </div>
           </div>
-          <span className={`pill ${p.status}`}>{p.status}</span>
-        </div>
-        <div className="person-detail">
-          <div className="avatar large">JK</div>
-          <div>
-            <h3>{p.name}</h3>
-            <p>{p.deviceCount} dispositivo(s)</p>
+          {editing === current.id && (
+            <PersonEditor
+              person={current}
+              teams={dir?.teams || []}
+              schedules={dir?.schedules || []}
+              saving={saving}
+              onSave={(patch) => save(current, patch)}
+            />
+          )}
+          <div className="person-detail">
+            <div className="avatar large">{initials(current.name)}</div>
+            <div>
+              <h3>{current.name}</h3>
+              <p>
+                {current.platform} · visto {date(current.lastSeen)}
+              </p>
+            </div>
+            <dl>
+              <div>
+                <dt>Monitorado</dt>
+                <dd>{duration(current.trackedSeconds)}</dd>
+              </div>
+              <div>
+                <dt>Ativo</dt>
+                <dd>{duration(current.activeSeconds)}</dd>
+              </div>
+              <div>
+                <dt>Ocioso</dt>
+                <dd>{duration(current.idleSeconds)}</dd>
+              </div>
+              <div>
+                <dt>Produtivo</dt>
+                <dd>{duration(current.productiveSeconds)}</dd>
+              </div>
+            </dl>
           </div>
-          <dl>
-            <div>
-              <dt>Monitorado</dt>
-              <dd>{duration(p.trackedSeconds)}</dd>
-            </div>
-            <div>
-              <dt>Ativo</dt>
-              <dd>{duration(p.activeSeconds)}</dd>
-            </div>
-            <div>
-              <dt>Ocioso</dt>
-              <dd>{duration(p.idleSeconds)}</dd>
-            </div>
-            <div>
-              <dt>Produtivo</dt>
-              <dd>{duration(p.productiveSeconds)}</dd>
-            </div>
-          </dl>
-        </div>
-      </article>
-      <article className="card schedule-control">
-        <div>
-          <h2>Jornada de trabalho</h2>
-          <p>
-            O admin da organização pode aplicar individualmente ou em massa.
-          </p>
-        </div>
-        <select value={schedule} onChange={(e) => setSchedule(e.target.value)}>
-          {d.schedules.map((s) => (
-            <option value={s.id} key={s.id}>
+          <div className="person-apps">
+            <h3>Aplicativos mais usados</h3>
+            {current.topApps.length ? (
+              current.topApps.map((a) => (
+                <div className="app-row" key={a.name}>
+                  <span>
+                    <Glyph domain={appDomain(a.name)} label={a.name} kind="app" />
+                    <strong>{a.name}</strong>
+                  </span>
+                  <span>
+                    <em className={`classification ${a.classification}`}>
+                      {classLabel[a.classification]}
+                    </em>
+                  </span>
+                  <span>{a.duration}</span>
+                </div>
+              ))
+            ) : (
+              <State text="Sem atividade de apps neste período." />
+            )}
+          </div>
+          {(() => {
+            const device =
+              d.devices.find((x) => x.id === current.host) ||
+              d.devices.find((x) => x.name === current.device);
+            return device ? (
+              <Gallery
+                device={device}
+                person={current.name}
+                tenantId={d.tenant.id}
+              />
+            ) : null;
+          })()}
+        </article>
+      )}
+    </div>
+  );
+}
+function PersonEditor({
+  person,
+  teams,
+  schedules,
+  saving,
+  onSave,
+}: {
+  person: DirPerson;
+  teams: { id: string; name: string }[];
+  schedules: Schedule[];
+  saving: boolean;
+  onSave: (patch: Partial<DirPerson>) => void;
+}) {
+  const [name, setName] = useState(person.name);
+  const [title, setTitle] = useState(person.title);
+  const [teamId, setTeamId] = useState(person.teamId || "");
+  const [scheduleId, setScheduleId] = useState(person.scheduleId || "");
+  return (
+    <div className="person-edit">
+      <label>
+        Nome
+        <input value={name} onChange={(e) => setName(e.target.value)} />
+      </label>
+      <label>
+        Cargo
+        <input value={title} onChange={(e) => setTitle(e.target.value)} />
+      </label>
+      <label>
+        Time
+        <select value={teamId} onChange={(e) => setTeamId(e.target.value)}>
+          <option value="">Sem time</option>
+          {teams.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label>
+        Jornada
+        <select
+          value={scheduleId}
+          onChange={(e) => setScheduleId(e.target.value)}
+        >
+          <option value="">Sem jornada</option>
+          {schedules.map((s) => (
+            <option key={s.id} value={s.id}>
               {s.name} · {s.start}–{s.end}
             </option>
           ))}
         </select>
-        <button className="primary" onClick={apply}>
-          Aplicar aos selecionados ({d.people.length})
-        </button>
-      </article>
-      <article className="card">
-        <h2>Aplicativos do colaborador</h2>
-        <AppTable apps={d.apps} />
-      </article>
-      {device && <Gallery device={device} person={p.name} tenantId={d.tenant.id} />}
+      </label>
+      <button
+        className="primary"
+        disabled={saving}
+        onClick={() =>
+          onSave({
+            name,
+            title,
+            teamId: teamId || null,
+            scheduleId: scheduleId || null,
+          })
+        }
+      >
+        {saving ? "Salvando…" : "Salvar"}
+      </button>
     </div>
   );
 }
