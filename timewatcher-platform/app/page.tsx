@@ -14,6 +14,7 @@ type Section =
   | "Visão geral"
   | "Empresas"
   | "Pessoas"
+  | "Times"
   | "Dispositivos"
   | "Atividades"
   | "Relatórios"
@@ -26,6 +27,7 @@ type IconName =
   | "overview"
   | "companies"
   | "people"
+  | "teams"
   | "devices"
   | "activity"
   | "reports"
@@ -170,6 +172,7 @@ const baseNav: { name: Section; icon: IconName }[] = [
   { name: "Visão geral", icon: "overview" },
   { name: "Empresas", icon: "companies" },
   { name: "Pessoas", icon: "people" },
+  { name: "Times", icon: "teams" },
   { name: "Dispositivos", icon: "devices" },
   { name: "Atividades", icon: "activity" },
   { name: "Relatórios", icon: "reports" },
@@ -181,6 +184,7 @@ const desc: Record<Section, string> = {
   "Visão geral": "Produtividade, aderência e uso do tempo com dados reais.",
   Empresas: "Governança multiempresa controlada pela Synova.",
   Pessoas: "Jornada, atividade, ativos e capturas por colaborador.",
+  Times: "Grupos de colaboradores e o gestor responsável por cada um.",
   Dispositivos: "Inventário e saúde dos computadores vinculados.",
   Atividades: "Aplicativos, URLs, janelas, atividade e ociosidade.",
   Relatórios: "Filtros e exportações para análise operacional.",
@@ -192,7 +196,9 @@ const desc: Record<Section, string> = {
 const ROLE_SHORT: Record<string, string> = {
   super_admin: "Super admin",
   org_admin: "Administrador",
+  manager: "Gestor",
   member: "Membro",
+  employee: "Colaborador",
 };
 function duration(v: number) {
   const t = Math.max(0, Math.round(v)),
@@ -338,6 +344,15 @@ function Icon({ name }: { name: IconName }) {
           <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
           <circle cx="9" cy="7" r="4" />
           <path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
+        </svg>
+      );
+    case "teams":
+      return (
+        <svg {...p}>
+          <circle cx="9" cy="8" r="3" />
+          <circle cx="17" cy="9" r="2.2" />
+          <path d="M3.5 20v-1.5a4 4 0 0 1 4-4h3a4 4 0 0 1 4 4V20" />
+          <path d="M16 14.2a3 3 0 0 1 4.5 2.6V20" />
         </svg>
       );
     case "devices":
@@ -622,6 +637,8 @@ function Dashboard() {
   const nav = baseNav.filter((n) => {
     if (n.name === "Empresas") return data?.viewer.role === "super_admin";
     if (n.name === "Usuários") return isAdmin;
+    if (n.name === "Times")
+      return isAdmin || data?.viewer.role === "manager";
     return true;
   });
   const tenantName = data?.tenant.name || "TeamWatcher";
@@ -875,6 +892,7 @@ function Content({
   if (active === "Visão geral") return <Overview d={data} go={setActive} />;
   if (active === "Empresas") return <Companies d={data} reload={reload} />;
   if (active === "Pessoas") return <People d={data} reload={reload} />;
+  if (active === "Times") return <Teams d={data} />;
   if (active === "Dispositivos") return <Devices d={data} />;
   if (active === "Atividades") return <Activities d={data} />;
   if (active === "Relatórios")
@@ -1426,6 +1444,148 @@ function PersonEditor({
     </div>
   );
 }
+type TeamRow = {
+  id: string;
+  name: string;
+  tenantId: string;
+  managerEmail: string | null;
+  managerName: string | null;
+  memberCount: number;
+  members: { id: string; name: string; host: string }[];
+};
+type TeamsData = {
+  teams: TeamRow[];
+  managers: { email: string; name?: string; role: string }[];
+  people: { id: string; name: string; teamId: string | null }[];
+};
+function Teams({ d }: { d: Data }) {
+  const [td, setTd] = useState<TeamsData | null>(null);
+  const [name, setName] = useState("");
+  const [managerEmail, setManagerEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const canManage =
+    d.viewer.role === "super_admin" || d.viewer.role === "org_admin";
+  const load = useCallback(async () => {
+    const res = await fetch("/platform-api/dashboard/teams", {
+      credentials: "same-origin",
+    });
+    if (res.ok) setTd(await res.json());
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+  async function create() {
+    if (!name.trim()) return;
+    setBusy(true);
+    await fetch("/platform-api/dashboard/teams", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, managerEmail }),
+    });
+    setBusy(false);
+    setName("");
+    setManagerEmail("");
+    load();
+  }
+  async function remove(id: string) {
+    if (!confirm("Excluir este time? Os colaboradores ficam sem time.")) return;
+    await fetch("/platform-api/dashboard/teams/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    load();
+  }
+  return (
+    <div className="page-stack">
+      {canManage && (
+        <article className="card">
+          <div className="card-head">
+            <div>
+              <h2>Novo time</h2>
+              <p>Agrupe colaboradores e defina um gestor responsável.</p>
+            </div>
+          </div>
+          <div className="invite-form">
+            <input
+              placeholder="Nome do time (ex.: Vendas)"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+            <select
+              value={managerEmail}
+              onChange={(e) => setManagerEmail(e.target.value)}
+            >
+              <option value="">Sem gestor</option>
+              {td?.managers.map((m) => (
+                <option key={m.email} value={m.email}>
+                  {m.name || m.email} · {ROLE_SHORT[m.role] || m.role}
+                </option>
+              ))}
+            </select>
+            <button
+              className="btn"
+              onClick={create}
+              disabled={busy || !name.trim()}
+            >
+              {busy ? "Criando…" : "Criar time"}
+            </button>
+          </div>
+        </article>
+      )}
+      <div className="section-summary">
+        <strong>{td?.teams.length ?? 0} time(s)</strong>
+        <span>
+          Cada gestor enxerga apenas os colaboradores dos times sob sua
+          responsabilidade.
+        </span>
+      </div>
+      {td && td.teams.length === 0 ? (
+        <State text="Nenhum time criado ainda." />
+      ) : (
+        <div className="team-grid">
+          {td?.teams.map((t) => (
+            <article className="card team-card" key={t.id}>
+              <div className="card-head">
+                <div>
+                  <h2>{t.name}</h2>
+                  <p>
+                    {t.managerName || t.managerEmail
+                      ? `Gestor: ${t.managerName || t.managerEmail}`
+                      : "Sem gestor definido"}
+                  </p>
+                </div>
+                <span className="pill offline">{t.memberCount} membro(s)</span>
+              </div>
+              <div className="team-members">
+                {t.members.length ? (
+                  t.members.map((m) => (
+                    <span className="member-chip" key={m.id}>
+                      <span className="avatar tiny">{initials(m.name)}</span>
+                      {m.name}
+                    </span>
+                  ))
+                ) : (
+                  <State text="Sem colaboradores. Atribua em Pessoas → Editar." />
+                )}
+              </div>
+              {canManage && (
+                <div className="team-actions">
+                  <button
+                    className="btn ghost danger"
+                    onClick={() => remove(t.id)}
+                  >
+                    Excluir time
+                  </button>
+                </div>
+              )}
+            </article>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 function Devices({ d }: { d: Data }) {
   return (
     <div className="page-stack">
@@ -1965,7 +2125,7 @@ function Settings({ d, prefs }: { d: Data; prefs: Prefs }) {
 }
 function Users({ d }: { d: Data }) {
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState<"member" | "admin">("member");
+  const [role, setRole] = useState("member");
   const [link, setLink] = useState("");
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -1973,6 +2133,7 @@ function Users({ d }: { d: Data }) {
     accounts: { email: string; name?: string; role: string; status?: string }[];
     invites: { email: string; role: string; expiresAt: string }[];
   } | null>(null);
+  const me = d.viewer.username;
   const load = useCallback(() => {
     fetch("/platform-api/dashboard/invites", { credentials: "same-origin" })
       .then((r) => (r.ok ? r.json() : null))
@@ -1982,27 +2143,49 @@ function Users({ d }: { d: Data }) {
   useEffect(() => {
     load();
   }, [load]);
+  async function post(path: string, body: object) {
+    const r = await fetch(`/platform-api/dashboard/${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(body),
+    });
+    return r.ok ? r.json() : null;
+  }
   const invite = async () => {
     if (!email.includes("@")) return;
     setBusy(true);
     setLink("");
     setCopied(false);
-    try {
-      const r = await fetch("/platform-api/dashboard/invites", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify({ email, role }),
-      });
-      const x = await r.json();
-      if (r.ok) {
-        setLink(x.inviteUrl || "");
-        setEmail("");
-        load();
-      }
-    } catch {}
+    const x = await post("invites", { email, role });
+    if (x) {
+      setLink(x.inviteUrl || "");
+      setEmail("");
+      load();
+    }
     setBusy(false);
   };
+  async function updateUser(target: string, patch: object) {
+    await post("users", { email: target, ...patch });
+    load();
+  }
+  async function removeUser(target: string) {
+    if (!confirm(`Remover ${target}? A conta perde o acesso imediatamente.`))
+      return;
+    await post("users/delete", { email: target });
+    load();
+  }
+  async function resend(target: string) {
+    const x = await post("invites/resend", { email: target });
+    if (x?.inviteUrl) {
+      setLink(x.inviteUrl);
+      setCopied(false);
+    }
+  }
+  async function revoke(target: string) {
+    await post("invites/revoke", { email: target });
+    load();
+  }
   return (
     <div className="page-stack">
       <div className="section-summary">
@@ -2026,11 +2209,9 @@ function Users({ d }: { d: Data }) {
             value={email}
             onChange={(e) => setEmail(e.target.value)}
           />
-          <select
-            value={role}
-            onChange={(e) => setRole(e.target.value as "member" | "admin")}
-          >
+          <select value={role} onChange={(e) => setRole(e.target.value)}>
             <option value="member">Membro</option>
+            <option value="manager">Gestor</option>
             <option value="admin">Administrador</option>
           </select>
           <button
@@ -2063,7 +2244,7 @@ function Users({ d }: { d: Data }) {
         <article className="card">
           <div className="card-head">
             <div>
-              <h2>Contas ativas</h2>
+              <h2>Contas</h2>
               <p>{list?.accounts.length || 0} usuário(s)</p>
             </div>
           </div>
@@ -2075,15 +2256,56 @@ function Users({ d }: { d: Data }) {
                     <strong>{a.name || a.email}</strong>
                     <small>{a.email}</small>
                   </div>
-                  <span
-                    className={`pill ${a.role === "member" ? "offline" : "online"}`}
-                  >
-                    {ROLE_SHORT[a.role] || a.role}
-                  </span>
+                  <div className="row-actions">
+                    <span
+                      className={`pill ${a.status === "disabled" ? "offline" : a.role === "member" ? "offline" : "online"}`}
+                    >
+                      {a.status === "disabled"
+                        ? "Inativo"
+                        : ROLE_SHORT[a.role] || a.role}
+                    </span>
+                    {a.email === me ? (
+                      <em className="row-self">você</em>
+                    ) : (
+                      <>
+                        <select
+                          value={a.role}
+                          disabled={a.role === "super_admin"}
+                          onChange={(e) =>
+                            updateUser(a.email, { role: e.target.value })
+                          }
+                        >
+                          <option value="member">Membro</option>
+                          <option value="manager">Gestor</option>
+                          <option value="org_admin">Administrador</option>
+                          {a.role === "super_admin" && (
+                            <option value="super_admin">Super admin</option>
+                          )}
+                        </select>
+                        <button
+                          className="btn ghost"
+                          onClick={() =>
+                            updateUser(a.email, {
+                              status:
+                                a.status === "disabled" ? "active" : "disabled",
+                            })
+                          }
+                        >
+                          {a.status === "disabled" ? "Reativar" : "Desativar"}
+                        </button>
+                        <button
+                          className="btn ghost danger"
+                          onClick={() => removeUser(a.email)}
+                        >
+                          Remover
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
               ))
             ) : (
-              <State text="Nenhuma conta ativa ainda." />
+              <State text="Nenhuma conta ainda." />
             )}
           </div>
         </article>
@@ -2102,9 +2324,23 @@ function Users({ d }: { d: Data }) {
                     <strong>{i.email}</strong>
                     <small>expira {date(i.expiresAt)}</small>
                   </div>
-                  <span className="pill offline">
-                    {ROLE_SHORT[i.role] || i.role}
-                  </span>
+                  <div className="row-actions">
+                    <span className="pill offline">
+                      {ROLE_SHORT[i.role] || i.role}
+                    </span>
+                    <button
+                      className="btn ghost"
+                      onClick={() => resend(i.email)}
+                    >
+                      Reenviar
+                    </button>
+                    <button
+                      className="btn ghost danger"
+                      onClick={() => revoke(i.email)}
+                    >
+                      Revogar
+                    </button>
+                  </div>
                 </div>
               ))
             ) : (

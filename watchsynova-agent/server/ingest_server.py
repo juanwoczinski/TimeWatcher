@@ -57,6 +57,7 @@ def default_config() -> dict:
         "enrollments": [],
         "accounts": {},
         "invites": [],
+        "teams": [],
     }
 
 
@@ -327,6 +328,9 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     def belongs(bucket_id: str) -> bool:
         return bucket_id.startswith(f"tw-{tenant_id}_") if tenant_id != "synova" else not bucket_id.startswith("tw-") or bucket_id.startswith("tw-synova_")
     buckets = {key: value for key, value in buckets.items() if belongs(key)}
+    if current_viewer["role"] == "manager":
+        allowed_hosts = manager_hosts(config, current_viewer.get("email", ""), tenant_id)
+        buckets = {key: value for key, value in buckets.items() if value.get("hostname") in allowed_hosts}
     window_buckets = [(key, value) for key, value in buckets.items() if value.get("type") == "currentwindow"]
     afk_buckets = [(key, value) for key, value in buckets.items() if value.get("type") == "afkstatus"]
     input_buckets = [(key, value) for key, value in buckets.items() if value.get("type") == "os.hid.input"]
@@ -394,7 +398,8 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     presses = sum(int(e.get("data", {}).get("presses", 0)) for e in input_events)
     clicks = sum(int(e.get("data", {}).get("clicks", 0)) for e in input_events)
     devices = [{"id": host, "name": host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop", "lastSeen": seen.isoformat(), "status": "online" if (end - seen).total_seconds() < 300 else "offline", "trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "presses": presses, "clicks": clicks} for host, seen in sorted(devices_by_host.items())]
-    people = [person.copy() for person in config["people"] if person["tenantId"] == tenant_id]
+    _managed = managed_team_ids(config, current_viewer.get("email", ""), tenant_id) if current_viewer["role"] == "manager" else None
+    people = [person.copy() for person in config["people"] if person["tenantId"] == tenant_id and (_managed is None or person.get("teamId") in _managed)]
     if people:
         people[0]["deviceIds"] = [d["id"] for d in devices]
     productive = category_seconds["productive"]
@@ -415,6 +420,18 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     }
 
 
+def managed_team_ids(config: dict, email: str, tenant_id: str) -> set:
+    """Team ids a manager is responsible for."""
+    target = (email or "").lower()
+    return {t["id"] for t in config.get("teams", []) if t.get("tenantId") == tenant_id and (t.get("managerEmail") or "").lower() == target}
+
+
+def manager_hosts(config: dict, email: str, tenant_id: str) -> set:
+    """Telemetry hosts a manager may see (people assigned to their teams)."""
+    team_ids = managed_team_ids(config, email, tenant_id)
+    return {p.get("host") for p in config.get("people", []) if p.get("tenantId") == tenant_id and p.get("teamId") in team_ids and p.get("host")}
+
+
 def people_directory(params: dict, current_viewer: dict) -> dict:
     """Real people directory: one monitored person per telemetry host, with
     per-person metrics merged with persistent metadata (name/team/schedule)."""
@@ -425,6 +442,9 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
     def belongs(bucket_id: str) -> bool:
         return bucket_id.startswith(f"tw-{tenant_id}_") if tenant_id != "synova" else not bucket_id.startswith("tw-") or bucket_id.startswith("tw-synova_")
     buckets = {key: value for key, value in buckets.items() if belongs(key)}
+
+    is_manager = current_viewer["role"] == "manager"
+    managed = managed_team_ids(config, current_viewer.get("email", ""), tenant_id) if is_manager else set()
 
     hosts: dict = {}
     for bucket_id, bucket in buckets.items():
@@ -468,6 +488,9 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
         active = max(0.0, tracked - min(idle, tracked))
         pid = re.sub(r"[^a-z0-9-]", "-", host.lower()).strip("-") or "host"
         meta = meta_by_key.get(host) or meta_by_key.get(pid) or {}
+        # RBAC: a manager only sees people assigned to the teams they manage
+        if is_manager and meta.get("teamId") not in managed:
+            continue
         # skip noise/validation buckets: a host with zero signal is not a person
         if tracked == 0 and idle == 0 and presses == 0 and clicks == 0 and host not in meta_by_key and pid not in meta_by_key:
             continue
@@ -529,6 +552,8 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/dashboard/people":
             try: return self.send_json(200, people_directory(params, current))
             except Exception as error: return self.send_json(502, {"error": "people_unavailable", "detail": str(error)[:240]})
+        if parsed.path == "/dashboard/teams":
+            return self.list_teams(current, params)
         if parsed.path in ("/dashboard/export.csv", "/dashboard/export.json"):
             try: data = dashboard_data(params, current)
             except Exception as error: return self.send_json(502, {"error": "export_unavailable", "detail": str(error)[:240]})
@@ -562,7 +587,9 @@ class Handler(BaseHTTPRequestHandler):
                 config = load_config()
                 if parsed.path == "/dashboard/invites":
                     email = str(payload.get("email", "")).strip().lower(); role = payload.get("role", "member")
-                    role = "org_admin" if role in ("admin", "administrador", "org_admin") else "member"
+                    if role in ("admin", "administrador", "org_admin"): role = "org_admin"
+                    elif role in ("manager", "gestor"): role = "manager"
+                    else: role = "member"
                     if "@" not in email or len(email) > 200: return self.send_json(400, {"error": "invalid_email"})
                     if config["accounts"].get(email, {}).get("status") == "active": return self.send_json(409, {"error": "account_exists"})
                     token = secrets.token_urlsafe(32); now = datetime.now(timezone.utc)
@@ -593,6 +620,62 @@ class Handler(BaseHTTPRequestHandler):
                     for field in ("teamId", "scheduleId"):
                         if field in payload: entry[field] = payload[field] or None
                     save_config(config); audit("person.update", current["email"], {"id": pid}); return self.send_json(200, entry)
+                if parsed.path == "/dashboard/teams":
+                    name = str(payload.get("name", "")).strip()
+                    if not name: return self.send_json(400, {"error": "name_required"})
+                    t_tenant = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
+                    tid = re.sub(r"[^a-z0-9-]", "-", str(payload.get("id") or name).lower()).strip("-") or "time"
+                    manager_email = str(payload.get("managerEmail", "")).strip().lower() or None
+                    team = {"id": tid, "tenantId": t_tenant, "name": name[:80], "managerEmail": manager_email}
+                    teams = config.setdefault("teams", [])
+                    config["teams"] = [t for t in teams if not (t["id"] == tid and t.get("tenantId") == t_tenant)] + [team]
+                    save_config(config); audit("team.upsert", current["email"], {"id": tid, "manager": manager_email}); return self.send_json(201, team)
+                if parsed.path == "/dashboard/teams/delete":
+                    tid = str(payload.get("id", "")).strip()
+                    config["teams"] = [t for t in config.get("teams", []) if not (t["id"] == tid and (current["role"] == "super_admin" or t.get("tenantId") == current["tenantId"]))]
+                    for person in config.get("people", []):
+                        if person.get("teamId") == tid: person["teamId"] = None
+                    save_config(config); audit("team.delete", current["email"], {"id": tid}); return self.send_json(200, {"deleted": tid})
+                if parsed.path == "/dashboard/users":
+                    email = str(payload.get("email", "")).strip().lower()
+                    target = config["accounts"].get(email)
+                    if not target: return self.send_json(404, {"error": "account_not_found"})
+                    if current["role"] != "super_admin" and target.get("tenantId") != current["tenantId"]: return self.send_json(403, {"error": "forbidden"})
+                    if target.get("role") == "super_admin" and current["role"] != "super_admin": return self.send_json(403, {"error": "forbidden"})
+                    if email == current["email"]: return self.send_json(409, {"error": "cannot_modify_self"})
+                    if "role" in payload:
+                        new_role = str(payload.get("role", "")).lower()
+                        if new_role in ("admin", "administrador", "org_admin"): target["role"] = "org_admin"
+                        elif new_role in ("manager", "gestor"): target["role"] = "manager"
+                        elif new_role in ("member", "employee", "colaborador", "membro"): target["role"] = "member"
+                        elif new_role == "super_admin" and current["role"] == "super_admin": target["role"] = "super_admin"
+                    if "status" in payload:
+                        target["status"] = "disabled" if str(payload.get("status")).lower() in ("disabled", "inactive", "inativo", "suspenso") else "active"
+                    save_config(config); audit("user.update", current["email"], {"email": email, "role": target.get("role"), "status": target.get("status")})
+                    return self.send_json(200, {"email": email, "name": target.get("name"), "role": target.get("role"), "status": target.get("status")})
+                if parsed.path == "/dashboard/users/delete":
+                    email = str(payload.get("email", "")).strip().lower()
+                    target = config["accounts"].get(email)
+                    if not target: return self.send_json(404, {"error": "account_not_found"})
+                    if current["role"] != "super_admin" and target.get("tenantId") != current["tenantId"]: return self.send_json(403, {"error": "forbidden"})
+                    if target.get("role") == "super_admin" and current["role"] != "super_admin": return self.send_json(403, {"error": "forbidden"})
+                    if email == current["email"]: return self.send_json(409, {"error": "cannot_delete_self"})
+                    config["accounts"].pop(email, None)
+                    save_config(config); audit("user.delete", current["email"], {"email": email}); return self.send_json(200, {"deleted": email})
+                if parsed.path == "/dashboard/invites/resend":
+                    email = str(payload.get("email", "")).strip().lower()
+                    match = next((i for i in config["invites"] if i.get("email") == email and (current["role"] == "super_admin" or i.get("tenantId") == current["tenantId"])), None)
+                    if not match: return self.send_json(404, {"error": "invite_not_found"})
+                    token = secrets.token_urlsafe(32); now = datetime.now(timezone.utc)
+                    match["tokenHash"] = hashlib.sha256(token.encode()).hexdigest(); match["createdAt"] = now.isoformat(); match["expiresAt"] = (now + timedelta(days=7)).isoformat()
+                    save_config(config); audit("invite.resend", current["email"], {"email": email})
+                    host = self.headers.get("Host") or urllib.parse.urlsplit(PUBLIC_URL).netloc
+                    return self.send_json(200, {"email": email, "role": match["role"], "inviteUrl": f"https://{host}/?invite={token}"})
+                if parsed.path == "/dashboard/invites/revoke":
+                    email = str(payload.get("email", "")).strip().lower()
+                    before = len(config["invites"])
+                    config["invites"] = [i for i in config["invites"] if not (i.get("email") == email and (current["role"] == "super_admin" or i.get("tenantId") == current["tenantId"]))]
+                    save_config(config); audit("invite.revoke", current["email"], {"email": email}); return self.send_json(200, {"revoked": before - len(config["invites"])})
                 if parsed.path == "/dashboard/tenants":
                     if current["role"] != "super_admin": return self.send_json(403, {"error": "super_admin_required"})
                     tenant = {"id": re.sub(r"[^a-z0-9-]", "-", str(payload.get("id") or payload.get("name", "empresa")).lower()).strip("-"), "name": str(payload.get("name", "Empresa"))[:100], "kind": "customer", "status": "active", "peopleCount": 0, "deviceCount": 0}; config["tenants"].append(tenant); save_config(config); audit("tenant.create", current["email"], {"id": tenant["id"]}); return self.send_json(201, tenant)
@@ -725,6 +808,23 @@ class Handler(BaseHTTPRequestHandler):
             audit("account.activate", email, {"role": match["role"], "tenantId": match.get("tenantId", "synova")})
             account = config["accounts"][email]
         self.send_session(email, {"email": email, "name": account["name"], "role": account["role"], "tenantId": account["tenantId"]})
+
+    def list_teams(self, current: dict, params: dict) -> None:
+        config = load_config()
+        is_super = current["role"] == "super_admin"
+        tenant_id = params.get("tenant", [current["tenantId"]])[0] if is_super else current["tenantId"]
+        teams = [t for t in config.get("teams", []) if t.get("tenantId") == tenant_id]
+        if current["role"] == "manager":
+            teams = [t for t in teams if (t.get("managerEmail") or "").lower() == current["email"].lower()]
+        people = [p for p in config.get("people", []) if p.get("tenantId") == tenant_id]
+        accounts = config.get("accounts", {})
+        def enrich(team: dict) -> dict:
+            members = [{"id": p.get("id"), "name": p.get("name") or p.get("host"), "host": p.get("host")} for p in people if p.get("teamId") == team["id"]]
+            mgr = accounts.get((team.get("managerEmail") or "").lower())
+            return {**team, "members": members, "memberCount": len(members), "managerName": mgr.get("name") if mgr else None}
+        managers = [{"email": e, "name": a.get("name"), "role": a.get("role")} for e, a in accounts.items() if (is_super or a.get("tenantId") == tenant_id) and a.get("role") in ("manager", "org_admin", "super_admin") and a.get("status") == "active"]
+        all_people = [{"id": p.get("id"), "name": p.get("name") or p.get("host"), "teamId": p.get("teamId")} for p in people]
+        self.send_json(200, {"teams": [enrich(t) for t in teams], "managers": managers, "people": all_people})
 
     def list_invites(self, current: dict) -> None:
         config = load_config(); is_super = current["role"] == "super_admin"; tenant = current["tenantId"]

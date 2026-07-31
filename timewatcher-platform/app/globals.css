@@ -2416,3 +2416,63 @@ h3 {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* Teams + user management */
+.row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.row-actions select {
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  padding: 5px 8px;
+  font-size: 12px;
+  color: var(--ink);
+}
+.row-self {
+  font-size: 11px;
+  color: var(--faint);
+}
+.btn.ghost.danger {
+  color: var(--bad);
+}
+.btn.ghost.danger:hover {
+  background: var(--bad-bg);
+  border-color: var(--bad);
+}
+.team-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 14px;
+}
+.team-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+.member-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 11px 4px 4px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--bg);
+  font-size: 12px;
+  color: var(--ink);
+}
+.avatar.tiny {
+  width: 22px;
+  height: 22px;
+  font-size: 9px;
+}
+.team-actions {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
+}
