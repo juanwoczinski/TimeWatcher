@@ -58,6 +58,8 @@ def default_config() -> dict:
         "accounts": {},
         "invites": [],
         "teams": [],
+        "classification": {},
+        "policies": {},
     }
 
 
@@ -113,13 +115,29 @@ def duration_label(seconds: float) -> str:
     return f"{hours}h {minutes:02d}m" if hours else f"{minutes}m {secs:02d}s"
 
 
-def classify(value: str) -> str:
+def classify(value: str, rules: dict | None = None) -> str:
     normalized = value.strip().lower()
+    if rules:
+        for token in rules.get("unproductive", []):
+            if token and token in normalized:
+                return "unproductive"
+        for token in rules.get("productive", []):
+            if token and token in normalized:
+                return "productive"
+        for token in rules.get("neutral", []):
+            if token and token in normalized:
+                return "neutral"
     if any(token in normalized for token in PRODUCTIVE):
         return "productive"
     if any(token in normalized for token in UNPRODUCTIVE):
         return "unproductive"
     return "neutral"
+
+
+def classification_rules(config: dict, tenant_id: str) -> dict:
+    """Per-tenant classification overrides (app/domain substrings)."""
+    raw = (config.get("classification") or {}).get(tenant_id) or {}
+    return {cat: [str(t).strip().lower() for t in (raw.get(cat) or []) if str(t).strip()] for cat in ("productive", "unproductive", "neutral")}
 
 
 _CONFIG_LOCK = threading.Lock()
@@ -261,10 +279,21 @@ def audit(action: str, actor: str = "-", detail: object = None) -> None:
         pass
 
 
+def retention_days() -> int:
+    try:
+        configured = int((load_config().get("policies") or {}).get("retentionDays"))
+        if configured >= 0:
+            return configured
+    except (TypeError, ValueError):
+        pass
+    return RETENTION_DAYS
+
+
 def purge_old_screenshots() -> int:
-    if RETENTION_DAYS <= 0:
+    days = retention_days()
+    if days <= 0:
         return 0
-    cutoff = time.time() - RETENTION_DAYS * 86400
+    cutoff = time.time() - days * 86400
     removed = 0
     try:
         for path in (DATA_DIR / "screenshots").rglob("*.jpg"):
@@ -284,8 +313,9 @@ def retention_worker() -> None:
         try:
             removed = purge_old_screenshots()
             if removed:
-                audit("retention.purge", "system", {"removed": removed, "days": RETENTION_DAYS})
-                print(f"[retention] purged {removed} screenshots older than {RETENTION_DAYS}d", flush=True)
+                days = retention_days()
+                audit("retention.purge", "system", {"removed": removed, "days": days})
+                print(f"[retention] purged {removed} screenshots older than {days}d", flush=True)
         except Exception:
             pass
         time.sleep(86400)
@@ -331,6 +361,7 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     if current_viewer["role"] == "manager":
         allowed_hosts = manager_hosts(config, current_viewer.get("email", ""), tenant_id)
         buckets = {key: value for key, value in buckets.items() if value.get("hostname") in allowed_hosts}
+    rules = classification_rules(config, tenant_id)
     window_buckets = [(key, value) for key, value in buckets.items() if value.get("type") == "currentwindow"]
     afk_buckets = [(key, value) for key, value in buckets.items() if value.get("type") == "afkstatus"]
     input_buckets = [(key, value) for key, value in buckets.items() if value.get("type") == "os.hid.input"]
@@ -377,14 +408,14 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     category_seconds = {"productive": 0.0, "neutral": 0.0, "unproductive": 0.0}
     apps = []
     for name, seconds in sorted(app_seconds.items(), key=lambda item: item[1], reverse=True):
-        category = classify(name)
+        category = classify(name, rules)
         category_seconds[category] += seconds
         apps.append({"name": name, "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": category, "share": round(seconds / tracked_seconds * 100 if tracked_seconds else 0, 1)})
     urls = []
     web_total = sum(page_seconds.values())
     for url, seconds in sorted(page_seconds.items(), key=lambda item: item[1], reverse=True):
         domain = urllib.parse.urlsplit(url).hostname or url
-        urls.append({"url": url, "domain": domain, "title": page_titles.get(url, ""), "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": classify(domain), "share": round(seconds / web_total * 100 if web_total else 0, 1)})
+        urls.append({"url": url, "domain": domain, "title": page_titles.get(url, ""), "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": classify(domain, rules), "share": round(seconds / web_total * 100 if web_total else 0, 1)})
 
     all_buckets = window_buckets + afk_buckets + input_buckets + web_buckets
     last_seen_values, devices_by_host = [], {}
@@ -415,7 +446,7 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
         "period": period, "range": {"start": start.isoformat(), "end": end.isoformat()}, "generatedAt": datetime.now(timezone.utc).isoformat(),
         "person": person, "people": people, "schedules": [s for s in config["schedules"] if s["tenantId"] == tenant_id], "schedule": schedule,
         "summary": {"trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "idleSeconds": round(idle_seconds, 3), "productiveSeconds": round(productive, 3), "neutralSeconds": round(category_seconds["neutral"], 3), "unproductiveSeconds": round(category_seconds["unproductive"], 3), "focusScore": score, "deviceCount": len(devices), "onlineDeviceCount": sum(d["status"] == "online" for d in devices), "screenshotCount": screenshot_count, "urlCount": len(urls), "webSeconds": round(web_total, 3), "lastSeen": max(last_seen_values).isoformat() if last_seen_values else None},
-        "devices": devices, "apps": apps[:100], "urls": urls[:200], "domains": [{"domain": d, "seconds": round(s, 3), "duration": duration_label(s), "classification": classify(d)} for d, s in sorted(domain_seconds.items(), key=lambda item: item[1], reverse=True)],
+        "devices": devices, "apps": apps[:100], "urls": urls[:200], "domains": [{"domain": d, "seconds": round(s, 3), "duration": duration_label(s), "classification": classify(d, rules)} for d, s in sorted(domain_seconds.items(), key=lambda item: item[1], reverse=True)],
         "timeline": [{"hour": h, "label": f"{h:02d}h", "seconds": round(hourly[h], 3)} for h in range(24) if hourly[h] > 0], "recent": recent[:100], "input": {"presses": presses, "clicks": clicks},
     }
 
@@ -445,6 +476,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
 
     is_manager = current_viewer["role"] == "manager"
     managed = managed_team_ids(config, current_viewer.get("email", ""), tenant_id) if is_manager else set()
+    rules = classification_rules(config, tenant_id)
 
     hosts: dict = {}
     for bucket_id, bucket in buckets.items():
@@ -476,7 +508,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
                 seconds = max(0.0, float(event.get("duration", 0)))
                 app = str(event.get("data", {}).get("app", "Não identificado")) or "Não identificado"
                 app_seconds[app] += seconds; tracked += seconds
-        productive = sum(seconds for app, seconds in app_seconds.items() if classify(app) == "productive")
+        productive = sum(seconds for app, seconds in app_seconds.items() if classify(app, rules) == "productive")
         idle = 0.0
         for bucket_id in slot["afk"]:
             for event in events_for(bucket_id):
@@ -507,7 +539,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
             "trackedSeconds": round(tracked, 3), "activeSeconds": round(active, 3), "idleSeconds": round(idle, 3),
             "productiveSeconds": round(productive, 3), "focusScore": round(productive / tracked * 100 if tracked else 0),
             "presses": presses, "clicks": clicks,
-            "topApps": [{"name": app, "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": classify(app)} for app, seconds in top_apps],
+            "topApps": [{"name": app, "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": classify(app, rules)} for app, seconds in top_apps],
         })
     people.sort(key=lambda person: (person["status"] != "online", person["name"].lower()))
     tenant = next((t for t in config["tenants"] if t["id"] == tenant_id), {"id": tenant_id, "name": tenant_id})
@@ -554,6 +586,8 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as error: return self.send_json(502, {"error": "people_unavailable", "detail": str(error)[:240]})
         if parsed.path == "/dashboard/teams":
             return self.list_teams(current, params)
+        if parsed.path == "/dashboard/policies":
+            return self.get_policies(current, params)
         if parsed.path in ("/dashboard/export.csv", "/dashboard/export.json"):
             try: data = dashboard_data(params, current)
             except Exception as error: return self.send_json(502, {"error": "export_unavailable", "detail": str(error)[:240]})
@@ -676,6 +710,19 @@ class Handler(BaseHTTPRequestHandler):
                     before = len(config["invites"])
                     config["invites"] = [i for i in config["invites"] if not (i.get("email") == email and (current["role"] == "super_admin" or i.get("tenantId") == current["tenantId"]))]
                     save_config(config); audit("invite.revoke", current["email"], {"email": email}); return self.send_json(200, {"revoked": before - len(config["invites"])})
+                if parsed.path == "/dashboard/policies":
+                    p_tenant = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
+                    if isinstance(payload.get("classification"), dict):
+                        clean = {}
+                        for cat in ("productive", "unproductive", "neutral"):
+                            vals = payload["classification"].get(cat) or []
+                            clean[cat] = sorted({str(t).strip().lower() for t in vals if str(t).strip()})[:200]
+                        config.setdefault("classification", {})[p_tenant] = clean
+                    if "retentionDays" in payload and current["role"] == "super_admin":
+                        try: config.setdefault("policies", {})["retentionDays"] = max(0, min(3650, int(payload["retentionDays"])))
+                        except (TypeError, ValueError): pass
+                    save_config(config); audit("policies.update", current["email"], {"tenant": p_tenant})
+                    return self.send_json(200, {"retentionDays": retention_days(), "classification": classification_rules(config, p_tenant)})
                 if parsed.path == "/dashboard/tenants":
                     if current["role"] != "super_admin": return self.send_json(403, {"error": "super_admin_required"})
                     tenant = {"id": re.sub(r"[^a-z0-9-]", "-", str(payload.get("id") or payload.get("name", "empresa")).lower()).strip("-"), "name": str(payload.get("name", "Empresa"))[:100], "kind": "customer", "status": "active", "peopleCount": 0, "deviceCount": 0}; config["tenants"].append(tenant); save_config(config); audit("tenant.create", current["email"], {"id": tenant["id"]}); return self.send_json(201, tenant)
@@ -808,6 +855,17 @@ class Handler(BaseHTTPRequestHandler):
             audit("account.activate", email, {"role": match["role"], "tenantId": match.get("tenantId", "synova")})
             account = config["accounts"][email]
         self.send_session(email, {"email": email, "name": account["name"], "role": account["role"], "tenantId": account["tenantId"]})
+
+    def get_policies(self, current: dict, params: dict) -> None:
+        config = load_config()
+        is_super = current["role"] == "super_admin"
+        tenant_id = params.get("tenant", [current["tenantId"]])[0] if is_super else current["tenantId"]
+        self.send_json(200, {
+            "retentionDays": retention_days(),
+            "retentionEditable": is_super,
+            "classification": classification_rules(config, tenant_id),
+            "defaults": {"productive": sorted(PRODUCTIVE), "unproductive": sorted(UNPRODUCTIVE)},
+        })
 
     def list_teams(self, current: dict, params: dict) -> None:
         config = load_config()

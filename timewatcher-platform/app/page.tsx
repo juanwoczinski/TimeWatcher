@@ -1990,6 +1990,138 @@ function persist(key: string, value: string) {
     localStorage.setItem(key, value);
   } catch {}
 }
+type PolicyData = {
+  retentionDays: number;
+  retentionEditable: boolean;
+  classification: {
+    productive: string[];
+    unproductive: string[];
+    neutral: string[];
+  };
+  defaults: { productive: string[]; unproductive: string[] };
+};
+function Policies({ d }: { d: Data }) {
+  const canEdit =
+    d.viewer.role === "super_admin" || d.viewer.role === "org_admin";
+  const [pol, setPol] = useState<PolicyData | null>(null);
+  const [prod, setProd] = useState("");
+  const [unprod, setUnprod] = useState("");
+  const [neutral, setNeutral] = useState("");
+  const [days, setDays] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const load = useCallback(async () => {
+    const r = await fetch("/platform-api/dashboard/policies", {
+      credentials: "same-origin",
+    });
+    if (!r.ok) return;
+    const p: PolicyData = await r.json();
+    setPol(p);
+    setProd(p.classification.productive.join(", "));
+    setUnprod(p.classification.unproductive.join(", "));
+    setNeutral(p.classification.neutral.join(", "));
+    setDays(String(p.retentionDays));
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+  if (!canEdit) return null;
+  const parse = (s: string) =>
+    s
+      .split(/[\n,]/)
+      .map((x) => x.trim())
+      .filter(Boolean);
+  async function save() {
+    setBusy(true);
+    const body: {
+      classification: { productive: string[]; unproductive: string[]; neutral: string[] };
+      retentionDays?: number;
+    } = {
+      classification: {
+        productive: parse(prod),
+        unproductive: parse(unprod),
+        neutral: parse(neutral),
+      },
+    };
+    if (pol?.retentionEditable) body.retentionDays = Number(days) || 0;
+    await fetch("/platform-api/dashboard/policies", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(body),
+    });
+    setBusy(false);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2200);
+    load();
+  }
+  return (
+    <article className="card policy-card">
+      <h2>Políticas de classificação e retenção</h2>
+      <p className="settings-copy">
+        Defina como aplicativos e sites entram na conta de produtividade — vale
+        para todas as telas. Uma palavra por linha ou separadas por vírgula
+        (correspondência por trecho, ex.: “youtube”).
+      </p>
+      <div className="policy-fields">
+        <label className="policy-field productive">
+          <span>Produtivo</span>
+          <textarea
+            value={prod}
+            onChange={(e) => setProd(e.target.value)}
+            placeholder="figma, notion, github"
+          />
+        </label>
+        <label className="policy-field unproductive">
+          <span>Improdutivo</span>
+          <textarea
+            value={unprod}
+            onChange={(e) => setUnprod(e.target.value)}
+            placeholder="instagram, tiktok, jogos.com"
+          />
+        </label>
+        <label className="policy-field neutral">
+          <span>Neutro (força)</span>
+          <textarea
+            value={neutral}
+            onChange={(e) => setNeutral(e.target.value)}
+            placeholder="opcional"
+          />
+        </label>
+      </div>
+      {pol && (
+        <p className="settings-hint">
+          Padrões da plataforma já cobrem {pol.defaults.productive.slice(0, 5).join(", ")}… (produtivo) e{" "}
+          {pol.defaults.unproductive.slice(0, 5).join(", ")}… (improdutivo). Suas
+          regras têm prioridade.
+        </p>
+      )}
+      <div className="retention-row">
+        <div>
+          <strong>Retenção de capturas (LGPD)</strong>
+          <span>Capturas mais antigas que o limite são apagadas diariamente.</span>
+        </div>
+        <div className="retention-input">
+          <input
+            type="number"
+            min={0}
+            max={3650}
+            value={days}
+            onChange={(e) => setDays(e.target.value)}
+            disabled={!pol?.retentionEditable}
+          />
+          <span>dias{pol && !pol.retentionEditable ? " · definido pela Synova" : ""}</span>
+        </div>
+      </div>
+      <div className="policy-actions">
+        <button className="primary" onClick={save} disabled={busy}>
+          {busy ? "Salvando…" : "Salvar políticas"}
+        </button>
+        {saved && <span className="saved-flag">Salvo ✓</span>}
+      </div>
+    </article>
+  );
+}
 function Settings({ d, prefs }: { d: Data; prefs: Prefs }) {
   const setPeriod = (v: Period) => {
     prefs.setPeriod(v);
@@ -2086,6 +2218,7 @@ function Settings({ d, prefs }: { d: Data; prefs: Prefs }) {
           </div>
         </div>
       </article>
+      <Policies d={d} />
       <article className="card">
         <h2>Coleta</h2>
         <dl className="settings-list">
