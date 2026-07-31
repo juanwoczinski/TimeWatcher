@@ -21,6 +21,7 @@ type Section =
   | "Relatórios"
   | "Instaladores"
   | "Usuários"
+  | "Faturamento"
   | "Configurações"
   | "Minha conta";
 type Role = "super_admin" | "org_admin" | "manager" | "employee";
@@ -35,6 +36,7 @@ type IconName =
   | "reports"
   | "installers"
   | "settings"
+  | "billing"
   | "chevron"
   | "logout"
   | "caret"
@@ -181,6 +183,7 @@ const baseNav: { name: Section; icon: IconName }[] = [
   { name: "Relatórios", icon: "reports" },
   { name: "Instaladores", icon: "installers" },
   { name: "Usuários", icon: "userplus" },
+  { name: "Faturamento", icon: "billing" },
   { name: "Configurações", icon: "settings" },
 ];
 const desc: Record<Section, string> = {
@@ -194,6 +197,7 @@ const desc: Record<Section, string> = {
   Relatórios: "Filtros e exportações para análise operacional.",
   Instaladores: "Distribuição individual ou em massa vinculada ao tenant.",
   Usuários: "Convites e contas de acesso da sua empresa.",
+  Faturamento: "Plano, assentos e cobrança por licença.",
   Configurações: "Políticas de coleta, classificação e privacidade.",
   "Minha conta": "Perfil, segurança e preferências da sua conta.",
 };
@@ -397,6 +401,13 @@ function Icon({ name }: { name: IconName }) {
       return (
         <svg {...p}>
           <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" />
+        </svg>
+      );
+    case "billing":
+      return (
+        <svg {...p}>
+          <rect x="2" y="5" width="20" height="14" rx="2" />
+          <path d="M2 10h20M6 15h4" />
         </svg>
       );
     case "chevron":
@@ -647,7 +658,7 @@ function Dashboard() {
     data?.viewer.role === "super_admin" || data?.viewer.role === "org_admin";
   const nav = baseNav.filter((n) => {
     if (n.name === "Empresas") return data?.viewer.role === "super_admin";
-    if (n.name === "Usuários") return isAdmin;
+    if (n.name === "Usuários" || n.name === "Faturamento") return isAdmin;
     if (n.name === "Times" || n.name === "Alertas")
       return isAdmin || data?.viewer.role === "manager";
     return true;
@@ -919,6 +930,7 @@ function Content({
     );
   if (active === "Instaladores") return <Installers d={data} />;
   if (active === "Usuários") return <Users d={data} />;
+  if (active === "Faturamento") return <Billing d={data} />;
   if (active === "Minha conta") return <Account d={data} prefs={prefs} />;
   return <Settings d={data} prefs={prefs} />;
 }
@@ -1454,6 +1466,229 @@ function PersonEditor({
         {saving ? "Salvando…" : "Salvar"}
       </button>
     </div>
+  );
+}
+type BillingData = {
+  plan: string;
+  seats: number;
+  usedSeats: number;
+  status: string;
+  cycleStart: string | null;
+  prices: { essential: number; intelligence: number };
+  monthlyTotal: number;
+  pricingEditable: boolean;
+  features: { intelligence: boolean };
+  plans: { id: string; name: string; price: number; features: string[] }[];
+};
+const brl = (n: number) =>
+  n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+function Billing({ d }: { d: Data }) {
+  void d;
+  const [b, setB] = useState<BillingData | null>(null);
+  const [seats, setSeats] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const load = useCallback(async () => {
+    const r = await fetch("/platform-api/dashboard/billing", {
+      credentials: "same-origin",
+    });
+    if (r.ok) {
+      const x: BillingData = await r.json();
+      setB(x);
+      setSeats(String(x.seats));
+    }
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+  async function update(patch: object) {
+    setBusy(true);
+    await fetch("/platform-api/dashboard/billing", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(patch),
+    });
+    setBusy(false);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+    load();
+  }
+  if (!b) return <State text="Carregando faturamento…" />;
+  const over = b.usedSeats > b.seats;
+  return (
+    <div className="page-stack">
+      <div className="section-summary">
+        <strong>
+          Plano {b.plan === "intelligence" ? "Intelligence" : "Essential"} ·{" "}
+          {brl(b.monthlyTotal)}/mês
+        </strong>
+        <span>
+          {b.seats} assento(s) licenciado(s) · {b.usedSeats} em uso ·{" "}
+          {b.status === "active" ? "assinatura ativa" : "em avaliação (trial)"}.
+        </span>
+      </div>
+      <div className="plan-grid">
+        {b.plans.map((pl) => (
+          <article
+            className={`card plan-card${b.plan === pl.id ? " current" : ""}`}
+            key={pl.id}
+          >
+            <div className="plan-head">
+              <h2>{pl.name}</h2>
+              {b.plan === pl.id && <span className="pill online">Atual</span>}
+            </div>
+            <p className="plan-price">
+              {brl(pl.price)}
+              <span>/assento·mês</span>
+            </p>
+            <ul className="plan-features">
+              {pl.features.map((f) => (
+                <li key={f}>{f}</li>
+              ))}
+            </ul>
+            <button
+              className={b.plan === pl.id ? "btn ghost" : "primary"}
+              disabled={busy || b.plan === pl.id}
+              onClick={() => update({ plan: pl.id })}
+            >
+              {b.plan === pl.id ? "Plano atual" : `Mudar para ${pl.name}`}
+            </button>
+          </article>
+        ))}
+      </div>
+      <article className="card">
+        <div className="card-head">
+          <div>
+            <h2>Assentos</h2>
+            <p>Uma licença por colaborador monitorado.</p>
+          </div>
+          {saved && <span className="saved-flag">Salvo ✓</span>}
+        </div>
+        <div className="seats-row">
+          <div className="seats-usage">
+            <div className="seats-bar">
+              <b
+                className={over ? "over" : ""}
+                style={{
+                  width: `${Math.min(100, b.seats ? (b.usedSeats / b.seats) * 100 : 0)}%`,
+                }}
+              />
+            </div>
+            <span>
+              {b.usedSeats} de {b.seats} assentos em uso
+              {over ? " · acima do contratado" : ""}
+            </span>
+          </div>
+          <div className="seats-edit">
+            <input
+              type="number"
+              min={0}
+              value={seats}
+              onChange={(e) => setSeats(e.target.value)}
+            />
+            <button
+              className="btn"
+              disabled={busy}
+              onClick={() => update({ seats: Number(seats) || 0 })}
+            >
+              Atualizar
+            </button>
+          </div>
+        </div>
+      </article>
+      <article className={`card gate-card${b.features.intelligence ? " unlocked" : ""}`}>
+        <div className="card-head">
+          <div>
+            <h2>TeamWatcher Intelligence (IA)</h2>
+            <p>
+              {b.features.intelligence
+                ? "Incluído no seu plano."
+                : "Disponível no plano Intelligence."}
+            </p>
+          </div>
+          <span className={`pill ${b.features.intelligence ? "online" : "offline"}`}>
+            {b.features.intelligence ? "Ativo" : "Bloqueado"}
+          </span>
+        </div>
+        <p className="settings-copy">
+          Perguntas em linguagem natural, resumos automáticos e recomendações por
+          evidências.{" "}
+          {b.features.intelligence
+            ? "Os recursos de IA chegam na Fase 2."
+            : "Faça upgrade para habilitar."}
+        </p>
+        {!b.features.intelligence && (
+          <button
+            className="primary"
+            disabled={busy}
+            onClick={() => update({ plan: "intelligence" })}
+          >
+            Fazer upgrade — {brl(b.prices.intelligence)}/assento
+          </button>
+        )}
+      </article>
+      {b.pricingEditable && (
+        <PriceEditor
+          prices={b.prices}
+          busy={busy}
+          onSave={(prices) => update({ prices })}
+        />
+      )}
+      <p className="billing-note">
+        Cobrança administrada pela Synova. A integração com gateway de pagamento é
+        ativada na contratação — este painel controla plano e licenças.
+      </p>
+    </div>
+  );
+}
+function PriceEditor({
+  prices,
+  onSave,
+  busy,
+}: {
+  prices: { essential: number; intelligence: number };
+  onSave: (p: { essential: number; intelligence: number }) => void;
+  busy: boolean;
+}) {
+  const [e, setE] = useState(String(prices.essential));
+  const [i, setI] = useState(String(prices.intelligence));
+  return (
+    <article className="card">
+      <div className="card-head">
+        <div>
+          <h2>Preços (Synova)</h2>
+          <p>Valor por assento/mês de cada plano.</p>
+        </div>
+      </div>
+      <div className="price-edit">
+        <label>
+          Essential
+          <input
+            type="number"
+            value={e}
+            onChange={(ev) => setE(ev.target.value)}
+          />
+        </label>
+        <label>
+          Intelligence
+          <input
+            type="number"
+            value={i}
+            onChange={(ev) => setI(ev.target.value)}
+          />
+        </label>
+        <button
+          className="btn"
+          disabled={busy}
+          onClick={() =>
+            onSave({ essential: Number(e) || 0, intelligence: Number(i) || 0 })
+          }
+        >
+          Salvar preços
+        </button>
+      </div>
+    </article>
   );
 }
 type AlertRow = {

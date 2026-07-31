@@ -60,6 +60,8 @@ def default_config() -> dict:
         "teams": [],
         "classification": {},
         "policies": {},
+        "billing": {},
+        "pricing": {},
     }
 
 
@@ -138,6 +140,29 @@ def classification_rules(config: dict, tenant_id: str) -> dict:
     """Per-tenant classification overrides (app/domain substrings)."""
     raw = (config.get("classification") or {}).get(tenant_id) or {}
     return {cat: [str(t).strip().lower() for t in (raw.get(cat) or []) if str(t).strip()] for cat in ("productive", "unproductive", "neutral")}
+
+
+DEFAULT_PRICES = {"essential": 29.90, "intelligence": 50.90}
+
+
+def billing_summary(config: dict, tenant_id: str) -> dict:
+    """Per-seat billing state for a tenant (payment gateway intentionally stubbed)."""
+    billing = (config.get("billing") or {}).get(tenant_id) or {}
+    pricing = config.get("pricing") or {}
+    prices = {k: float(pricing.get(k, DEFAULT_PRICES[k])) for k in DEFAULT_PRICES}
+    plan = billing.get("plan", "essential")
+    seats = int(billing.get("seats", 0) or 0)
+    used = sum(1 for p in config.get("people", []) if p.get("tenantId") == tenant_id and p.get("host"))
+    price = prices.get(plan, prices["essential"])
+    return {
+        "plan": plan, "seats": seats, "usedSeats": used, "status": billing.get("status", "trial"),
+        "cycleStart": billing.get("cycleStart"), "prices": prices, "monthlyTotal": round(seats * price, 2),
+        "features": {"intelligence": plan == "intelligence"},
+        "plans": [
+            {"id": "essential", "name": "Essential", "price": prices["essential"], "features": ["Monitoramento e capturas", "Pessoas, times e gestor", "Relatórios e exportações", "Alertas em tempo real"]},
+            {"id": "intelligence", "name": "Intelligence", "price": prices["intelligence"], "features": ["Tudo do Essential", "IA: perguntas em linguagem natural", "Resumos e recomendações", "Detecção de padrões"]},
+        ],
+    }
 
 
 _CONFIG_LOCK = threading.Lock()
@@ -652,6 +677,10 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/dashboard/alerts":
             try: return self.send_json(200, compute_alerts(current))
             except Exception as error: return self.send_json(502, {"error": "alerts_unavailable", "detail": str(error)[:240]})
+        if parsed.path == "/dashboard/billing":
+            config = load_config(); is_super = current["role"] == "super_admin"
+            tenant_id = params.get("tenant", [current["tenantId"]])[0] if is_super else current["tenantId"]
+            return self.send_json(200, {**billing_summary(config, tenant_id), "pricingEditable": is_super, "tenant": next((t for t in config["tenants"] if t["id"] == tenant_id), {"id": tenant_id, "name": tenant_id})})
         if parsed.path in ("/dashboard/export.csv", "/dashboard/export.json"):
             try: data = dashboard_data(params, current)
             except Exception as error: return self.send_json(502, {"error": "export_unavailable", "detail": str(error)[:240]})
@@ -787,6 +816,26 @@ class Handler(BaseHTTPRequestHandler):
                         except (TypeError, ValueError): pass
                     save_config(config); audit("policies.update", current["email"], {"tenant": p_tenant})
                     return self.send_json(200, {"retentionDays": retention_days(), "classification": classification_rules(config, p_tenant)})
+                if parsed.path == "/dashboard/billing":
+                    b_tenant = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
+                    billing = config.setdefault("billing", {}).setdefault(b_tenant, {})
+                    if str(payload.get("plan")) in ("essential", "intelligence"):
+                        billing["plan"] = str(payload["plan"])
+                    if "seats" in payload:
+                        try: billing["seats"] = max(0, min(100000, int(payload["seats"])))
+                        except (TypeError, ValueError): pass
+                    if current["role"] == "super_admin" and "status" in payload:
+                        billing["status"] = "active" if str(payload["status"]).lower() in ("active", "ativo") else "trial"
+                    if not billing.get("cycleStart"):
+                        billing["cycleStart"] = datetime.now(timezone.utc).date().isoformat()
+                    if current["role"] == "super_admin" and isinstance(payload.get("prices"), dict):
+                        pricing = config.setdefault("pricing", {})
+                        for key in ("essential", "intelligence"):
+                            if key in payload["prices"]:
+                                try: pricing[key] = round(float(payload["prices"][key]), 2)
+                                except (TypeError, ValueError): pass
+                    save_config(config); audit("billing.update", current["email"], {"tenant": b_tenant, "plan": billing.get("plan"), "seats": billing.get("seats")})
+                    return self.send_json(200, billing_summary(config, b_tenant))
                 if parsed.path == "/dashboard/tenants":
                     if current["role"] != "super_admin": return self.send_json(403, {"error": "super_admin_required"})
                     tenant = {"id": re.sub(r"[^a-z0-9-]", "-", str(payload.get("id") or payload.get("name", "empresa")).lower()).strip("-"), "name": str(payload.get("name", "Empresa"))[:100], "kind": "customer", "status": "active", "peopleCount": 0, "deviceCount": 0}; config["tenants"].append(tenant); save_config(config); audit("tenant.create", current["email"], {"id": tenant["id"]}); return self.send_json(201, tenant)
