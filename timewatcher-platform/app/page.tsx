@@ -15,6 +15,7 @@ type Section =
   | "Empresas"
   | "Pessoas"
   | "Times"
+  | "Alertas"
   | "Dispositivos"
   | "Atividades"
   | "Relatórios"
@@ -28,6 +29,7 @@ type IconName =
   | "companies"
   | "people"
   | "teams"
+  | "alerts"
   | "devices"
   | "activity"
   | "reports"
@@ -173,6 +175,7 @@ const baseNav: { name: Section; icon: IconName }[] = [
   { name: "Empresas", icon: "companies" },
   { name: "Pessoas", icon: "people" },
   { name: "Times", icon: "teams" },
+  { name: "Alertas", icon: "alerts" },
   { name: "Dispositivos", icon: "devices" },
   { name: "Atividades", icon: "activity" },
   { name: "Relatórios", icon: "reports" },
@@ -185,6 +188,7 @@ const desc: Record<Section, string> = {
   Empresas: "Governança multiempresa controlada pela Synova.",
   Pessoas: "Jornada, atividade, ativos e capturas por colaborador.",
   Times: "Grupos de colaboradores e o gestor responsável por cada um.",
+  Alertas: "Agente offline, ociosidade longa e desvios de jornada.",
   Dispositivos: "Inventário e saúde dos computadores vinculados.",
   Atividades: "Aplicativos, URLs, janelas, atividade e ociosidade.",
   Relatórios: "Filtros e exportações para análise operacional.",
@@ -353,6 +357,13 @@ function Icon({ name }: { name: IconName }) {
           <circle cx="17" cy="9" r="2.2" />
           <path d="M3.5 20v-1.5a4 4 0 0 1 4-4h3a4 4 0 0 1 4 4V20" />
           <path d="M16 14.2a3 3 0 0 1 4.5 2.6V20" />
+        </svg>
+      );
+    case "alerts":
+      return (
+        <svg {...p}>
+          <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+          <path d="M13.73 21a2 2 0 0 1-3.46 0" />
         </svg>
       );
     case "devices":
@@ -637,7 +648,7 @@ function Dashboard() {
   const nav = baseNav.filter((n) => {
     if (n.name === "Empresas") return data?.viewer.role === "super_admin";
     if (n.name === "Usuários") return isAdmin;
-    if (n.name === "Times")
+    if (n.name === "Times" || n.name === "Alertas")
       return isAdmin || data?.viewer.role === "manager";
     return true;
   });
@@ -893,6 +904,7 @@ function Content({
   if (active === "Empresas") return <Companies d={data} reload={reload} />;
   if (active === "Pessoas") return <People d={data} reload={reload} />;
   if (active === "Times") return <Teams d={data} />;
+  if (active === "Alertas") return <Alerts d={data} />;
   if (active === "Dispositivos") return <Devices d={data} />;
   if (active === "Atividades") return <Activities d={data} />;
   if (active === "Relatórios")
@@ -1441,6 +1453,67 @@ function PersonEditor({
       >
         {saving ? "Salvando…" : "Salvar"}
       </button>
+    </div>
+  );
+}
+type AlertRow = {
+  id: string;
+  type: string;
+  severity: "critical" | "warning" | "info";
+  personId: string;
+  personName: string;
+  device?: string;
+  message: string;
+  at: string;
+};
+const ALERT_LABEL: Record<string, string> = {
+  agent_offline: "Agente offline",
+  long_idle: "Ociosidade longa",
+  low_adherence: "Baixa aderência",
+};
+function Alerts({ d }: { d: Data }) {
+  void d;
+  const [ad, setAd] = useState<{
+    alerts: AlertRow[];
+    counts: { total: number; critical: number; warning: number };
+  } | null>(null);
+  const load = useCallback(async () => {
+    const r = await fetch("/platform-api/dashboard/alerts", {
+      credentials: "same-origin",
+    });
+    if (r.ok) setAd(await r.json());
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+  return (
+    <div className="page-stack">
+      <div className="section-summary">
+        <strong>{ad?.counts.total ?? 0} alerta(s) ativo(s)</strong>
+        <span>
+          {ad?.counts.critical ?? 0} crítico(s) · {ad?.counts.warning ?? 0} de
+          atenção · recalculado a cada abertura, sobre a jornada de cada pessoa.
+        </span>
+      </div>
+      {ad && ad.alerts.length === 0 ? (
+        <State text="Tudo tranquilo — nenhum alerta no momento." />
+      ) : (
+        <div className="alert-list">
+          {ad?.alerts.map((a) => (
+            <article className={`alert-row ${a.severity}`} key={a.id}>
+              <span className="alert-dot" />
+              <div className="alert-body">
+                <strong>
+                  {a.personName}
+                  <em>{ALERT_LABEL[a.type] || a.type}</em>
+                </strong>
+                <p>{a.message}</p>
+              </div>
+              <span className="alert-time">{date(a.at)}</span>
+            </article>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

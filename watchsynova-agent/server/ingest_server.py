@@ -552,6 +552,67 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
     }
 
 
+def compute_alerts(current_viewer: dict) -> dict:
+    """Real alert engine: agent offline during shift, long idle, low adherence.
+    Reuses the (RBAC-scoped) people directory for today's telemetry."""
+    data = people_directory({"period": ["today"]}, current_viewer)
+    config = load_config()
+    tenant_id = data["tenant"]["id"]
+    schedules = {s["id"]: s for s in config.get("schedules", []) if s.get("tenantId") == tenant_id}
+    pol = (config.get("policies") or {}).get("alerts") or {}
+    idle_threshold = int(pol.get("idleHours", 2)) * 3600
+    offline_minutes = int(pol.get("offlineMinutes", 15))
+    now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(LOCAL_TIMEZONE)
+    today = now_local.date().isoformat()
+    now_sec = now_local.hour * 3600 + now_local.minute * 60 + now_local.second
+
+    def hm_to_sec(hm: str) -> int:
+        try:
+            hours, minutes = str(hm).split(":"); return int(hours) * 3600 + int(minutes) * 60
+        except (ValueError, AttributeError):
+            return 0
+
+    alerts = []
+
+    def add(kind: str, severity: str, person: dict, message: str) -> None:
+        alerts.append({
+            "id": hashlib.sha1(f"{kind}:{person['id']}:{today}".encode()).hexdigest()[:12],
+            "type": kind, "severity": severity, "personId": person["id"], "personName": person["name"],
+            "device": person.get("device"), "message": message, "at": now_utc.isoformat(),
+        })
+
+    for person in data["people"]:
+        sched = schedules.get(person.get("scheduleId")) if person.get("scheduleId") else None
+        start = sched["start"] if sched else "09:00"
+        end = sched["end"] if sched else "18:00"
+        weekdays = sched["weekdays"] if sched else [1, 2, 3, 4, 5]
+        in_window = now_local.isoweekday() in weekdays and hm_to_sec(start) <= now_sec <= hm_to_sec(end)
+        last = parse_timestamp(person["lastSeen"]) if person.get("lastSeen") else None
+        if in_window and person["status"] == "offline":
+            mins = int((now_utc - last).total_seconds() / 60) if last else None
+            if mins is None or mins >= offline_minutes:
+                since = last.astimezone(LOCAL_TIMEZONE).strftime("%H:%M") if last else "hoje"
+                add("agent_offline", "critical", person, f"Sem sinal do agente desde {since} (deveria estar ativo agora).")
+        if person["idleSeconds"] >= idle_threshold:
+            add("long_idle", "warning", person, f"Ocioso por {duration_label(person['idleSeconds'])} no dia.")
+        if in_window:
+            elapsed = max(0, min(now_sec, hm_to_sec(end)) - hm_to_sec(start))
+            if elapsed > 3600 and person["activeSeconds"] < 0.3 * elapsed:
+                add("low_adherence", "warning", person, f"Aderência baixa: {duration_label(person['activeSeconds'])} ativos de ~{duration_label(elapsed)} de jornada.")
+
+    order = {"critical": 0, "warning": 1, "info": 2}
+    alerts.sort(key=lambda a: (order.get(a["severity"], 3), a["personName"].lower()))
+    return {
+        "alerts": alerts, "generatedAt": now_utc.isoformat(), "tenant": data["tenant"],
+        "counts": {
+            "total": len(alerts),
+            "critical": sum(1 for a in alerts if a["severity"] == "critical"),
+            "warning": sum(1 for a in alerts if a["severity"] == "warning"),
+        },
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "TimeWatcher/2"
 
@@ -588,6 +649,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.list_teams(current, params)
         if parsed.path == "/dashboard/policies":
             return self.get_policies(current, params)
+        if parsed.path == "/dashboard/alerts":
+            try: return self.send_json(200, compute_alerts(current))
+            except Exception as error: return self.send_json(502, {"error": "alerts_unavailable", "detail": str(error)[:240]})
         if parsed.path in ("/dashboard/export.csv", "/dashboard/export.json"):
             try: data = dashboard_data(params, current)
             except Exception as error: return self.send_json(502, {"error": "export_unavailable", "detail": str(error)[:240]})
