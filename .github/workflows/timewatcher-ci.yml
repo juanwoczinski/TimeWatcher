@@ -1,0 +1,40 @@
+name: TeamWatcher CI
+
+on:
+  push:
+    paths:
+      - "timewatcher-platform/**"
+      - "watchsynova-agent/**"
+      - ".github/workflows/timewatcher-ci.yml"
+  pull_request:
+    paths:
+      - "timewatcher-platform/**"
+      - "watchsynova-agent/**"
+
+jobs:
+  platform:
+    name: Platform build & tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: timewatcher-platform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: timewatcher-platform/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  server:
+    name: Ingest server syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m py_compile watchsynova-agent/server/ingest_server.py

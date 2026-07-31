@@ -12,6 +12,7 @@ import re
 import secrets
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -36,6 +37,10 @@ SESSION_TTL_DAYS = 14
 SESSION_SECRET_ENV = os.environ.get("TIMEWATCHER_SESSION_SECRET", "")
 BOOTSTRAP_ADMIN = os.environ.get("TIMEWATCHER_BOOTSTRAP_ADMIN", "")
 PUBLIC_URL = os.environ.get("TIMEWATCHER_PUBLIC_URL", "https://timewatcher.32-193-139-223.sslip.io")
+AUDIT_FILE = DATA_DIR / "audit.log"
+RETENTION_DAYS = int(os.environ.get("TIMEWATCHER_RETENTION_DAYS", "180") or "0")
+LOGIN_MAX_ATTEMPTS = 8
+LOGIN_WINDOW_SECONDS = 300
 PRODUCTIVE = {"chatgpt", "codex", "terminal", "visual studio code", "code", "xcode", "figma", "notion", "slack", "zoom", "meet", "docs", "drive", "github"}
 UNPRODUCTIVE = {"instagram", "facebook", "tiktok", "youtube", "netflix", "reddit", "twitter", "x.com"}
 
@@ -218,6 +223,73 @@ def viewer(headers) -> dict | None:
     return {"username": email, "email": email, "name": account.get("name", email), "role": account.get("role", "member"), "tenantId": account.get("tenantId", "synova")}
 
 
+_LOGIN_ATTEMPTS: dict = {}
+_ATTEMPT_LOCK = threading.Lock()
+_AUDIT_LOCK = threading.Lock()
+
+
+def client_ip(headers) -> str:
+    forwarded = headers.get("X-Forwarded-For", "")
+    return forwarded.split(",")[0].strip() if forwarded else "local"
+
+
+def login_blocked(key: str) -> bool:
+    now = time.time()
+    with _ATTEMPT_LOCK:
+        recent = [t for t in _LOGIN_ATTEMPTS.get(key, []) if now - t < LOGIN_WINDOW_SECONDS]
+        _LOGIN_ATTEMPTS[key] = recent
+        return len(recent) >= LOGIN_MAX_ATTEMPTS
+
+
+def record_login_failure(key: str) -> None:
+    with _ATTEMPT_LOCK:
+        _LOGIN_ATTEMPTS.setdefault(key, []).append(time.time())
+
+
+def clear_login_failures(key: str) -> None:
+    with _ATTEMPT_LOCK:
+        _LOGIN_ATTEMPTS.pop(key, None)
+
+
+def audit(action: str, actor: str = "-", detail: object = None) -> None:
+    entry = json.dumps({"ts": datetime.now(timezone.utc).isoformat(), "action": action, "actor": actor, "detail": detail}, ensure_ascii=False)
+    try:
+        with _AUDIT_LOCK, open(AUDIT_FILE, "a", encoding="utf-8") as handle:
+            handle.write(entry + "\n")
+    except OSError:
+        pass
+
+
+def purge_old_screenshots() -> int:
+    if RETENTION_DAYS <= 0:
+        return 0
+    cutoff = time.time() - RETENTION_DAYS * 86400
+    removed = 0
+    try:
+        for path in (DATA_DIR / "screenshots").rglob("*.jpg"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+                    removed += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return removed
+
+
+def retention_worker() -> None:
+    while True:
+        try:
+            removed = purge_old_screenshots()
+            if removed:
+                audit("retention.purge", "system", {"removed": removed, "days": RETENTION_DAYS})
+                print(f"[retention] purged {removed} screenshots older than {RETENTION_DAYS}d", flush=True)
+        except Exception:
+            pass
+        time.sleep(86400)
+
+
 def ingest_tenant(supplied_token: str) -> str | None:
     if hmac.compare_digest(supplied_token, TOKEN):
         return "synova"
@@ -365,7 +437,10 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/dashboard/") and not current: return self.send_json(401, {"error": "unauthenticated"})
         if parsed.path == "/dashboard/invites":
             if not self.authorized_admin(current): return self.send_json(403, {"error": "forbidden"})
-            return self.list_invites()
+            return self.list_invites(current)
+        if parsed.path == "/dashboard/audit":
+            if current["role"] != "super_admin": return self.send_json(403, {"error": "forbidden"})
+            return self.list_audit()
         if parsed.path == "/dashboard/data":
             try: return self.send_json(200, dashboard_data(params, current))
             except Exception as error: return self.send_json(502, {"error": "dashboard_unavailable", "detail": str(error)[:240]})
@@ -381,7 +456,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/dashboard/screenshots":
             tenant_id = params.get("tenant", [current["tenantId"]])[0] if current["role"] == "super_admin" else current["tenantId"]
             return self.list_screenshots(current, tenant_id)
-        if parsed.path.startswith("/dashboard/screenshots/"): return self.serve_screenshot(parsed.path.rsplit("/", 1)[-1])
+        if parsed.path.startswith("/dashboard/screenshots/"): return self.serve_screenshot(current, parsed.path.rsplit("/", 1)[-1])
         if parsed.path == "/dashboard/avatar": return self.serve_avatar(current)
         return self.send_json(404, {"error": "not_found"})
 
@@ -404,9 +479,11 @@ class Handler(BaseHTTPRequestHandler):
                     email = str(payload.get("email", "")).strip().lower(); role = payload.get("role", "member")
                     role = "org_admin" if role in ("admin", "administrador", "org_admin") else "member"
                     if "@" not in email or len(email) > 200: return self.send_json(400, {"error": "invalid_email"})
+                    if config["accounts"].get(email, {}).get("status") == "active": return self.send_json(409, {"error": "account_exists"})
                     token = secrets.token_urlsafe(32); now = datetime.now(timezone.utc)
                     invite = {"email": email, "role": role, "tenantId": current["tenantId"], "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "createdAt": now.isoformat(), "expiresAt": (now + timedelta(days=7)).isoformat()}
                     config["invites"] = [i for i in config["invites"] if i.get("email") != email] + [invite]; save_config(config)
+                    audit("invite.create", current["email"], {"email": email, "role": role})
                     host = self.headers.get("Host") or urllib.parse.urlsplit(PUBLIC_URL).netloc
                     return self.send_json(201, {"email": email, "role": role, "inviteUrl": f"https://{host}/?invite={token}"})
                 if parsed.path == "/dashboard/schedules":
@@ -419,9 +496,10 @@ class Handler(BaseHTTPRequestHandler):
                     save_config(config); return self.send_json(200, {"updated": len(ids)})
                 if parsed.path == "/dashboard/tenants":
                     if current["role"] != "super_admin": return self.send_json(403, {"error": "super_admin_required"})
-                    tenant = {"id": re.sub(r"[^a-z0-9-]", "-", str(payload.get("id") or payload.get("name", "empresa")).lower()).strip("-"), "name": str(payload.get("name", "Empresa"))[:100], "kind": "customer", "status": "active", "peopleCount": 0, "deviceCount": 0}; config["tenants"].append(tenant); save_config(config); return self.send_json(201, tenant)
+                    tenant = {"id": re.sub(r"[^a-z0-9-]", "-", str(payload.get("id") or payload.get("name", "empresa")).lower()).strip("-"), "name": str(payload.get("name", "Empresa"))[:100], "kind": "customer", "status": "active", "peopleCount": 0, "deviceCount": 0}; config["tenants"].append(tenant); save_config(config); audit("tenant.create", current["email"], {"id": tenant["id"]}); return self.send_json(201, tenant)
                 if parsed.path == "/dashboard/enrollments":
-                    tenant_id = payload.get("tenantId", current["tenantId"]); token = secrets.token_urlsafe(32); enrollment = {"id": str(uuid.uuid4()), "tenantId": tenant_id, "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "createdAt": datetime.now(timezone.utc).isoformat(), "expiresAt": (datetime.now(timezone.utc)+timedelta(days=7)).isoformat()}; config["enrollments"].append(enrollment); save_config(config); return self.send_json(201, {"token": token, "tenantId": tenant_id, "serverUrl": "https://timewatcher.32-193-139-223.sslip.io"})
+                    tenant_id = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
+                    token = secrets.token_urlsafe(32); enrollment = {"id": str(uuid.uuid4()), "tenantId": tenant_id, "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "createdAt": datetime.now(timezone.utc).isoformat(), "expiresAt": (datetime.now(timezone.utc)+timedelta(days=7)).isoformat()}; config["enrollments"].append(enrollment); save_config(config); audit("enrollment.create", current["email"], {"tenantId": tenant_id}); return self.send_json(201, {"token": token, "tenantId": tenant_id, "serverUrl": "https://timewatcher.32-193-139-223.sslip.io"})
                 return self.send_json(404, {"error": "not_found"})
         if parsed.path not in ("/v1/screenshots", "/v1/activity-events"): return self.send_json(404, {"error": "not_found"})
         supplied = self.headers.get("Authorization", "")
@@ -449,10 +527,12 @@ class Handler(BaseHTTPRequestHandler):
             stat = path.stat(); items.append({"id": path.stem, "capturedAt": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(), "size": stat.st_size, "url": f"/platform-api/dashboard/screenshots/{path.stem}", "personId": "juan-kleber", "personName": OWNER_NAME, **metadata.get(path.stem, {})})
         self.send_json(200, {"items": items})
 
-    def serve_screenshot(self, image_id: str) -> None:
+    def serve_screenshot(self, current: dict, image_id: str) -> None:
         if not re.fullmatch(r"[0-9a-f-]{36}", image_id): return self.send_json(400, {"error": "invalid_id"})
-        matches = list((DATA_DIR / "screenshots").rglob(f"{image_id}.jpg"))
+        root = DATA_DIR / "screenshots"
+        matches = list(root.rglob(f"{image_id}.jpg")) if current["role"] == "super_admin" else list((root / current["tenantId"]).rglob(f"{image_id}.jpg"))
         if not matches: return self.send_json(404, {"error": "not_found"})
+        audit("screenshot.view", current["email"], {"id": image_id})
         image = matches[0].read_bytes(); self.send_response(200); self.send_header("Content-Type", "image/jpeg"); self.send_header("Cache-Control", "private, max-age=300"); self.send_header("Content-Length", str(len(image))); self.end_headers(); self.wfile.write(image)
 
     def avatar_path(self, current: dict) -> Path:
@@ -492,9 +572,17 @@ class Handler(BaseHTTPRequestHandler):
         try: payload = self.read_json()
         except Exception: return self.send_json(400, {"error": "invalid_json"})
         email = str(payload.get("email", "")).strip().lower(); password = str(payload.get("password", ""))
+        ip = client_ip(self.headers)
+        if login_blocked(email) or login_blocked("ip:" + ip):
+            audit("auth.login_blocked", email, {"ip": ip})
+            return self.send_json(429, {"error": "too_many_attempts"})
         account = load_config()["accounts"].get(email)
         if not account or account.get("status") != "active" or not verify_password(password, account.get("pw", "")):
+            record_login_failure(email); record_login_failure("ip:" + ip)
+            audit("auth.login_failed", email, {"ip": ip})
             return self.send_json(401, {"error": "invalid_credentials"})
+        clear_login_failures(email); clear_login_failures("ip:" + ip)
+        audit("auth.login", email, {"ip": ip})
         self.send_session(email, {"email": email, "name": account.get("name", email), "role": account.get("role"), "tenantId": account.get("tenantId")})
 
     def do_logout(self) -> None:
@@ -530,16 +618,30 @@ class Handler(BaseHTTPRequestHandler):
                 except (KeyError, ValueError): continue
             if not match: return self.send_json(400, {"error": "invalid_invite"})
             email = match["email"]
+            if config["accounts"].get(email, {}).get("status") == "active":
+                config["invites"] = [i for i in config["invites"] if i.get("tokenHash") != match["tokenHash"]]; save_config(config)
+                return self.send_json(409, {"error": "account_exists"})
             config["accounts"][email] = {"name": email.split("@")[0].replace(".", " ").replace("_", " ").title(), "role": match["role"], "tenantId": match.get("tenantId", "synova"), "status": "active", "pw": hash_password(password)}
             config["invites"] = [i for i in config["invites"] if i.get("tokenHash") != match["tokenHash"]]; save_config(config)
+            audit("account.activate", email, {"role": match["role"], "tenantId": match.get("tenantId", "synova")})
             account = config["accounts"][email]
         self.send_session(email, {"email": email, "name": account["name"], "role": account["role"], "tenantId": account["tenantId"]})
 
-    def list_invites(self) -> None:
-        config = load_config()
-        accounts = [{"email": e, "name": a.get("name"), "role": a.get("role"), "status": a.get("status")} for e, a in config["accounts"].items()]
-        invites = [{"email": i["email"], "role": i["role"], "expiresAt": i["expiresAt"]} for i in config["invites"]]
+    def list_invites(self, current: dict) -> None:
+        config = load_config(); is_super = current["role"] == "super_admin"; tenant = current["tenantId"]
+        accounts = [{"email": e, "name": a.get("name"), "role": a.get("role"), "status": a.get("status")} for e, a in config["accounts"].items() if is_super or a.get("tenantId") == tenant]
+        invites = [{"email": i["email"], "role": i["role"], "expiresAt": i["expiresAt"]} for i in config["invites"] if is_super or i.get("tenantId") == tenant]
         self.send_json(200, {"accounts": accounts, "invites": invites})
+
+    def list_audit(self) -> None:
+        entries = []
+        try:
+            for line in AUDIT_FILE.read_text(encoding="utf-8").splitlines()[-300:]:
+                try: entries.append(json.loads(line))
+                except json.JSONDecodeError: continue
+        except OSError: pass
+        entries.reverse()
+        self.send_json(200, {"entries": entries})
 
     def receive_screenshot(self) -> None:
         if self.headers.get_content_type() != "image/jpeg": return self.send_json(415, {"error": "jpeg_required"})
@@ -597,4 +699,6 @@ def bootstrap_admin() -> None:
 
 
 if __name__ == "__main__":
-    DATA_DIR.mkdir(parents=True, exist_ok=True); load_config(); session_secret(); bootstrap_admin(); ThreadingHTTPServer(("127.0.0.1", 5610), Handler).serve_forever()
+    DATA_DIR.mkdir(parents=True, exist_ok=True); load_config(); session_secret(); bootstrap_admin()
+    threading.Thread(target=retention_worker, daemon=True).start()
+    ThreadingHTTPServer(("127.0.0.1", 5610), Handler).serve_forever()
