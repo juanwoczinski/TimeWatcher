@@ -62,6 +62,7 @@ def default_config() -> dict:
         "policies": {},
         "billing": {},
         "pricing": {},
+        "blockedHosts": {},
     }
 
 
@@ -443,9 +444,10 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
         urls.append({"url": url, "domain": domain, "title": page_titles.get(url, ""), "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": classify(domain, rules), "share": round(seconds / web_total * 100 if web_total else 0, 1)})
 
     all_buckets = window_buckets + afk_buckets + input_buckets + web_buckets
-    last_seen_values, devices_by_host = [], {}
+    last_seen_values, devices_by_host, clients_by_host = [], {}, {}
     for _, bucket in all_buckets:
         hostname = bucket.get("hostname") or "Dispositivo desconhecido"
+        if bucket.get("client"): clients_by_host.setdefault(hostname, str(bucket.get("client"))[:80])
         last_value = bucket.get("last_updated") or bucket.get("created")
         if last_value:
             last_dt = parse_timestamp(last_value)
@@ -453,7 +455,11 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
             devices_by_host[hostname] = max(last_dt, devices_by_host.get(hostname, last_dt))
     presses = sum(int(e.get("data", {}).get("presses", 0)) for e in input_events)
     clicks = sum(int(e.get("data", {}).get("clicks", 0)) for e in input_events)
-    devices = [{"id": host, "name": host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop", "lastSeen": seen.isoformat(), "status": "online" if (end - seen).total_seconds() < 300 else "offline", "trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "presses": presses, "clicks": clicks} for host, seen in sorted(devices_by_host.items())]
+    blocked_hosts = set((config.get("blockedHosts") or {}).get(tenant_id, []))
+    def device_health(seen: datetime) -> str:
+        age = (end - seen).total_seconds()
+        return "online" if age < 300 else "stale" if age < 3600 else "offline"
+    devices = [{"id": host, "name": host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop", "lastSeen": seen.isoformat(), "status": "online" if (end - seen).total_seconds() < 300 else "offline", "health": device_health(seen), "client": clients_by_host.get(host), "blocked": host in blocked_hosts, "trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "presses": presses, "clicks": clicks} for host, seen in sorted(devices_by_host.items())]
     _managed = managed_team_ids(config, current_viewer.get("email", ""), tenant_id) if current_viewer["role"] == "manager" else None
     people = [person.copy() for person in config["people"] if person["tenantId"] == tenant_id and (_managed is None or person.get("teamId") in _managed)]
     if people:
@@ -486,6 +492,10 @@ def manager_hosts(config: dict, email: str, tenant_id: str) -> set:
     """Telemetry hosts a manager may see (people assigned to their teams)."""
     team_ids = managed_team_ids(config, email, tenant_id)
     return {p.get("host") for p in config.get("people", []) if p.get("tenantId") == tenant_id and p.get("teamId") in team_ids and p.get("host")}
+
+
+def host_blocked(tenant_id: str, host: str) -> bool:
+    return host in set((load_config().get("blockedHosts") or {}).get(tenant_id, []))
 
 
 def people_directory(params: dict, current_viewer: dict) -> dict:
@@ -945,6 +955,18 @@ class Handler(BaseHTTPRequestHandler):
                                 except (TypeError, ValueError): pass
                     save_config(config); audit("billing.update", current["email"], {"tenant": b_tenant, "plan": billing.get("plan"), "seats": billing.get("seats")})
                     return self.send_json(200, billing_summary(config, b_tenant))
+                if parsed.path in ("/dashboard/devices/block", "/dashboard/devices/unblock"):
+                    host = str(payload.get("host", "")).strip()
+                    if not host: return self.send_json(400, {"error": "host_required"})
+                    dev_tenant = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
+                    blocked = config.setdefault("blockedHosts", {}).setdefault(dev_tenant, [])
+                    is_block = parsed.path.endswith("/block")
+                    if is_block:
+                        if host not in blocked: blocked.append(host)
+                    else:
+                        config["blockedHosts"][dev_tenant] = [h for h in blocked if h != host]
+                    save_config(config); audit("device.block" if is_block else "device.unblock", current["email"], {"host": host})
+                    return self.send_json(200, {"host": host, "blocked": is_block})
                 if parsed.path == "/dashboard/tenants":
                     if current["role"] != "super_admin": return self.send_json(403, {"error": "super_admin_required"})
                     tenant = {"id": re.sub(r"[^a-z0-9-]", "-", str(payload.get("id") or payload.get("name", "empresa")).lower()).strip("-"), "name": str(payload.get("name", "Empresa"))[:100], "kind": "customer", "status": "active", "peopleCount": 0, "deviceCount": 0}; config["tenants"].append(tenant); save_config(config); audit("tenant.create", current["email"], {"id": tenant["id"]}); return self.send_json(201, tenant)
@@ -1130,6 +1152,7 @@ class Handler(BaseHTTPRequestHandler):
         image = self.rfile.read(length)
         if len(image) != length or not image.startswith(b"\xff\xd8\xff"): return self.send_json(400, {"error": "invalid_jpeg"})
         device = self.headers.get("X-Device-Id", "unknown")[:120]; captured_at = self.headers.get("X-Captured-At", datetime.now(timezone.utc).isoformat())[:80]; app = self.headers.get("X-Active-App", "")[:300]; title = self.headers.get("X-Active-Title", "")[:1000]
+        if host_blocked(getattr(self, "ingest_tenant", "synova"), device): return self.send_json(403, {"error": "device_blocked"})
         target_dir = DATA_DIR / "screenshots" / getattr(self, "ingest_tenant", "synova") / datetime.now(timezone.utc).strftime("%Y-%m-%d"); target_dir.mkdir(parents=True, exist_ok=True); image_id = str(uuid.uuid4()); target = target_dir / f"{image_id}.jpg"
         with tempfile.NamedTemporaryFile(dir=target_dir, delete=False) as temporary: temporary.write(image); temporary.flush(); os.fsync(temporary.fileno()); temporary_path = Path(temporary.name)
         temporary_path.chmod(0o600); temporary_path.replace(target); digest = hashlib.sha256(image).hexdigest(); bucket_id = f"timewatcher-screenshot_{device}".replace("/", "_")
@@ -1143,6 +1166,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get_content_type() != "application/json": return self.send_json(415, {"error": "json_required"})
         try:
             payload = self.read_json(); bucket = payload["bucket"]; raw_bucket_id = str(bucket["id"])[:250].replace("/", "_"); tenant_id = getattr(self, "ingest_tenant", "synova"); bucket_id = raw_bucket_id if tenant_id == "synova" else f"tw-{tenant_id}_{raw_bucket_id}"; events = payload["events"]
+            if host_blocked(tenant_id, str(bucket.get("hostname", "unknown"))[:200]): return self.send_json(403, {"error": "device_blocked"})
             if not isinstance(events, list) or len(events) > 1000: raise ValueError()
             clean = [{"timestamp": str(e["timestamp"]), "duration": float(e.get("duration", 0)), "data": dict(e.get("data", {}))} for e in events]
             aw_request("POST", f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}", {"id": bucket_id, "type": str(bucket.get("type", "unknown"))[:200], "client": str(bucket.get("client", "timewatcher"))[:200], "hostname": str(bucket.get("hostname", "unknown"))[:200], "data": dict(bucket.get("data", {}))})

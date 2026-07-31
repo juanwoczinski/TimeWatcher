@@ -2824,6 +2824,24 @@ h3 {
   color: var(--faint);
   font-family: var(--data);
 }
+
+/* Device actions */
+.device-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.device-card.blocked {
+  opacity: 0.72;
+  border-color: var(--bad);
+}
+.device-card.blocked .device-icon {
+  background: var(--bad-bg);
+  color: var(--bad);
+}
 @media (max-width: 720px) {
   .plan-grid {
     grid-template-columns: 1fr;

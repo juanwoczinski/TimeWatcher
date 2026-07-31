@@ -76,6 +76,9 @@ type Device = {
   platform: string;
   lastSeen: string;
   status: "online" | "offline";
+  health?: "online" | "stale" | "offline";
+  client?: string | null;
+  blocked?: boolean;
   trackedSeconds: number;
   activeSeconds: number;
   presses: number;
@@ -916,7 +919,7 @@ function Content({
   if (active === "Pessoas") return <People d={data} reload={reload} />;
   if (active === "Times") return <Teams d={data} />;
   if (active === "Alertas") return <Alerts d={data} />;
-  if (active === "Dispositivos") return <Devices d={data} />;
+  if (active === "Dispositivos") return <Devices d={data} reload={reload} />;
   if (active === "Atividades") return <Activities d={data} />;
   if (active === "Relatórios")
     return (
@@ -1946,37 +1949,84 @@ function Teams({ d }: { d: Data }) {
     </div>
   );
 }
-function Devices({ d }: { d: Data }) {
+const HEALTH_LABEL: Record<string, string> = {
+  online: "Saudável",
+  stale: "Sinal atrasado",
+  offline: "Sem sinal",
+};
+function Devices({ d, reload }: { d: Data; reload: () => void }) {
+  const [busy, setBusy] = useState("");
+  const canManage =
+    d.viewer.role === "super_admin" || d.viewer.role === "org_admin";
+  async function toggleBlock(host: string, block: boolean) {
+    if (block && !confirm(`Revogar o acesso de ${host}? O agente para de enviar dados até ser reativado.`)) return;
+    setBusy(host);
+    await fetch(`/platform-api/dashboard/devices/${block ? "block" : "unblock"}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ host }),
+    });
+    setBusy("");
+    reload();
+  }
   return (
     <div className="page-stack">
       <div className="section-summary">
         <strong>{d.devices.length} dispositivo(s) real(is)</strong>
         <span>
-          Inventário criado automaticamente pela telemetria do agente.
+          Inventário criado automaticamente pela telemetria do agente ·
+          saúde e revogação de acesso por dispositivo.
         </span>
       </div>
       <div className="device-grid">
         {d.devices.map((x) => (
-          <DeviceCard d={x} key={x.id} />
+          <DeviceCard
+            d={x}
+            key={x.id}
+            canManage={canManage}
+            busy={busy === x.id}
+            onToggleBlock={() => toggleBlock(x.id, !x.blocked)}
+          />
         ))}
       </div>
-      {d.devices.map((x) => (
-        <Gallery device={x} person={d.person.name} tenantId={d.tenant.id} key={`g-${x.id}`} />
-      ))}
+      {d.devices
+        .filter((x) => !x.blocked)
+        .map((x) => (
+          <Gallery
+            device={x}
+            person={d.person.name}
+            tenantId={d.tenant.id}
+            key={`g-${x.id}`}
+          />
+        ))}
     </div>
   );
 }
-function DeviceCard({ d }: { d: Device }) {
+function DeviceCard({
+  d,
+  canManage,
+  busy,
+  onToggleBlock,
+}: {
+  d: Device;
+  canManage: boolean;
+  busy: boolean;
+  onToggleBlock: () => void;
+}) {
+  const health = d.blocked ? "offline" : d.health || d.status;
   return (
-    <article className="device-card">
+    <article className={`device-card${d.blocked ? " blocked" : ""}`}>
       <div className="device-icon">⌘</div>
       <div>
         <h3>{d.name}</h3>
         <p>
-          {d.platform} · {d.id}
+          {d.platform} · {d.client || "agente"} · {d.id}
         </p>
       </div>
-      <span className={`pill ${d.status}`}>{d.status}</span>
+      <span className={`pill ${d.blocked ? "offline" : health === "online" ? "online" : "offline"}`}>
+        {d.blocked ? "revogado" : HEALTH_LABEL[health] || d.status}
+      </span>
       <dl>
         <div>
           <dt>Sincronização</dt>
@@ -1995,6 +2045,21 @@ function DeviceCard({ d }: { d: Device }) {
           <dd>{d.clicks.toLocaleString("pt-BR")}</dd>
         </div>
       </dl>
+      {canManage && (
+        <div className="device-actions">
+          <button
+            className={d.blocked ? "btn" : "btn ghost danger"}
+            disabled={busy}
+            onClick={onToggleBlock}
+          >
+            {busy
+              ? "…"
+              : d.blocked
+                ? "Reativar acesso"
+                : "Revogar acesso"}
+          </button>
+        </div>
+      )}
     </article>
   );
 }
