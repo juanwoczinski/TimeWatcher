@@ -638,6 +638,106 @@ def compute_alerts(current_viewer: dict) -> dict:
     }
 
 
+# --- Pre-aggregation: response cache + daily per-person rollups ---
+AGGREGATES_FILE = DATA_DIR / "aggregates.json"
+CACHE_TTL = int(os.environ.get("TIMEWATCHER_CACHE_TTL", "30") or "0")
+_AW_CACHE: dict = {}
+_CACHE_LOCK = threading.Lock()
+_AGG_LOCK = threading.Lock()
+
+
+def cached(key: tuple, producer):
+    """Short-TTL memoization so repeated dashboard loads don't re-scan AW."""
+    if CACHE_TTL <= 0:
+        return producer()
+    now = time.time()
+    with _CACHE_LOCK:
+        hit = _AW_CACHE.get(key)
+        if hit and now - hit[0] < CACHE_TTL:
+            return hit[1]
+    value = producer()
+    with _CACHE_LOCK:
+        _AW_CACHE[key] = (now, value)
+        if len(_AW_CACHE) > 256:
+            for stale in [k for k, v in _AW_CACHE.items() if now - v[0] > CACHE_TTL]:
+                _AW_CACHE.pop(stale, None)
+    return value
+
+
+def load_aggregates() -> dict:
+    try:
+        return json.loads(AGGREGATES_FILE.read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_aggregates(data: dict) -> None:
+    tmp = AGGREGATES_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data), "utf-8")
+    tmp.replace(AGGREGATES_FILE)
+
+
+def aggregate_store_day(date_iso: str) -> None:
+    """Consolidate one day's per-person metrics into the rollup store."""
+    config = load_config()
+    with _AGG_LOCK:
+        agg = load_aggregates()
+    for tenant in config.get("tenants", []):
+        tid = tenant["id"]
+        viewer = {"role": "super_admin", "tenantId": tid, "email": "system", "name": "system", "username": "system"}
+        try:
+            data = people_directory({"period": ["custom"], "start": [date_iso], "end": [date_iso], "tenant": [tid]}, viewer)
+        except Exception:
+            continue
+        for person in data["people"]:
+            agg.setdefault(tid, {}).setdefault(person["host"], {})[date_iso] = {
+                "trackedSeconds": person["trackedSeconds"], "activeSeconds": person["activeSeconds"],
+                "idleSeconds": person["idleSeconds"], "productiveSeconds": person["productiveSeconds"],
+                "focusScore": person["focusScore"], "presses": person["presses"], "clicks": person["clicks"],
+            }
+    with _AGG_LOCK:
+        save_aggregates(agg)
+
+
+def rollup_worker() -> None:
+    while True:
+        try:
+            now_local = datetime.now(timezone.utc).astimezone(LOCAL_TIMEZONE)
+            for back in range(1, 4):  # catch up the last few days idempotently
+                aggregate_store_day((now_local.date() - timedelta(days=back)).isoformat())
+        except Exception:
+            pass
+        time.sleep(6 * 3600)
+
+
+def platform_trends(current_viewer: dict, days: int) -> dict:
+    """Per-day tenant trend from the rollup store (+ today computed live)."""
+    days = max(1, min(90, days))
+    config = load_config()
+    tenant_id = current_viewer["tenantId"]
+    agg = load_aggregates().get(tenant_id, {})
+    allowed = manager_hosts(config, current_viewer.get("email", ""), tenant_id) if current_viewer["role"] == "manager" else None
+    now_local = datetime.now(timezone.utc).astimezone(LOCAL_TIMEZONE)
+    today = now_local.date().isoformat()
+    series = []
+    for offset in range(days - 1, -1, -1):
+        day = (now_local.date() - timedelta(days=offset)).isoformat()
+        tracked = active = productive = 0.0
+        if day == today:
+            live = people_directory({"period": ["today"]}, current_viewer)
+            for person in live["people"]:
+                tracked += person["trackedSeconds"]; active += person["activeSeconds"]; productive += person["productiveSeconds"]
+        else:
+            for host, by_day in agg.items():
+                if allowed is not None and host not in allowed:
+                    continue
+                metrics = by_day.get(day)
+                if metrics:
+                    tracked += metrics["trackedSeconds"]; active += metrics["activeSeconds"]; productive += metrics["productiveSeconds"]
+        series.append({"date": day, "trackedSeconds": round(tracked, 1), "activeSeconds": round(active, 1), "productiveSeconds": round(productive, 1), "focusScore": round(productive / tracked * 100 if tracked else 0)})
+    return {"days": days, "series": series, "source": "rollup+live"}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "TimeWatcher/2"
 
@@ -665,18 +765,27 @@ class Handler(BaseHTTPRequestHandler):
             if current["role"] != "super_admin": return self.send_json(403, {"error": "forbidden"})
             return self.list_audit()
         if parsed.path == "/dashboard/data":
-            try: return self.send_json(200, dashboard_data(params, current))
+            key = ("data", current["role"], current["email"], current["tenantId"], str(params.get("tenant")), str(params.get("period")), str(params.get("start")), str(params.get("end")))
+            try: return self.send_json(200, cached(key, lambda: dashboard_data(params, current)))
             except Exception as error: return self.send_json(502, {"error": "dashboard_unavailable", "detail": str(error)[:240]})
         if parsed.path == "/dashboard/people":
-            try: return self.send_json(200, people_directory(params, current))
+            key = ("people", current["role"], current["email"], current["tenantId"], str(params.get("tenant")), str(params.get("period")), str(params.get("start")), str(params.get("end")))
+            try: return self.send_json(200, cached(key, lambda: people_directory(params, current)))
             except Exception as error: return self.send_json(502, {"error": "people_unavailable", "detail": str(error)[:240]})
         if parsed.path == "/dashboard/teams":
             return self.list_teams(current, params)
         if parsed.path == "/dashboard/policies":
             return self.get_policies(current, params)
         if parsed.path == "/dashboard/alerts":
-            try: return self.send_json(200, compute_alerts(current))
+            key = ("alerts", current["role"], current["email"], current["tenantId"])
+            try: return self.send_json(200, cached(key, lambda: compute_alerts(current)))
             except Exception as error: return self.send_json(502, {"error": "alerts_unavailable", "detail": str(error)[:240]})
+        if parsed.path == "/dashboard/trends":
+            raw = params.get("days", ["14"])[0]
+            days = int(raw) if str(raw).isdigit() else 14
+            key = ("trends", current["role"], current["email"], current["tenantId"], days)
+            try: return self.send_json(200, cached(key, lambda: platform_trends(current, days)))
+            except Exception as error: return self.send_json(502, {"error": "trends_unavailable", "detail": str(error)[:240]})
         if parsed.path == "/dashboard/billing":
             config = load_config(); is_super = current["role"] == "super_admin"
             tenant_id = params.get("tenant", [current["tenantId"]])[0] if is_super else current["tenantId"]
@@ -1071,4 +1180,5 @@ def bootstrap_admin() -> None:
 if __name__ == "__main__":
     DATA_DIR.mkdir(parents=True, exist_ok=True); load_config(); session_secret(); bootstrap_admin()
     threading.Thread(target=retention_worker, daemon=True).start()
+    threading.Thread(target=rollup_worker, daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", 5610), Handler).serve_forever()

@@ -956,6 +956,57 @@ function Metric({
     </article>
   );
 }
+type TrendPoint = {
+  date: string;
+  trackedSeconds: number;
+  activeSeconds: number;
+  productiveSeconds: number;
+  focusScore: number;
+};
+function TrendCard() {
+  const [series, setSeries] = useState<TrendPoint[] | null>(null);
+  useEffect(() => {
+    fetch("/platform-api/dashboard/trends?days=14", {
+      credentials: "same-origin",
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((x) => setSeries(x?.series || null))
+      .catch(() => {});
+  }, []);
+  if (!series) return null;
+  const max = Math.max(...series.map((p) => p.trackedSeconds), 1);
+  return (
+    <article className="card trend-card">
+      <div className="card-head">
+        <div>
+          <h2>Tendência · 14 dias</h2>
+          <p>Tempo monitorado por dia (produtivo destacado) · pré-agregado</p>
+        </div>
+      </div>
+      <div className="trend-bars">
+        {series.map((p) => (
+          <div
+            className="trend-col"
+            key={p.date}
+            title={`${p.date}: ${duration(p.trackedSeconds)} · ${p.focusScore}% foco`}
+          >
+            <span
+              className="trend-track"
+              style={{ height: `${Math.max(3, (p.trackedSeconds / max) * 100)}%` }}
+            >
+              <b
+                style={{
+                  height: `${p.trackedSeconds ? (p.productiveSeconds / p.trackedSeconds) * 100 : 0}%`,
+                }}
+              />
+            </span>
+            <small>{p.date.slice(8, 10)}</small>
+          </div>
+        ))}
+      </div>
+    </article>
+  );
+}
 function Overview({ d, go }: { d: Data; go: (s: Section) => void }) {
   const s = d.summary,
     total = s.productiveSeconds + s.neutralSeconds + s.unproductiveSeconds || 1,
@@ -984,6 +1035,7 @@ function Overview({ d, go }: { d: Data; go: (s: Section) => void }) {
           note={s.urlCount ? duration(s.webSeconds) : "Ative o coletor web"}
         />
       </div>
+      <TrendCard />
       <div className="grid-main">
         <article className="card activity">
           <div className="card-head">

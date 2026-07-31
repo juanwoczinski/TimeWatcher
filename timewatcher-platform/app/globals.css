@@ -2786,6 +2786,44 @@ h3 {
   color: var(--faint);
   margin: 2px 4px 0;
 }
+
+/* Trend sparkline */
+.trend-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  height: 120px;
+  margin-top: 8px;
+}
+.trend-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  height: 100%;
+  gap: 6px;
+}
+.trend-track {
+  width: 60%;
+  max-width: 26px;
+  min-height: 3px;
+  background: var(--slate-bg);
+  border-radius: 5px 5px 0 0;
+  display: flex;
+  flex-direction: column-reverse;
+  overflow: hidden;
+}
+.trend-track b {
+  display: block;
+  width: 100%;
+  background: var(--brand);
+}
+.trend-col small {
+  font-size: 10px;
+  color: var(--faint);
+  font-family: var(--data);
+}
 @media (max-width: 720px) {
   .plan-grid {
     grid-template-columns: 1fr;
