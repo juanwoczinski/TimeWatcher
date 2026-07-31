@@ -468,6 +468,9 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
         active = max(0.0, tracked - min(idle, tracked))
         pid = re.sub(r"[^a-z0-9-]", "-", host.lower()).strip("-") or "host"
         meta = meta_by_key.get(host) or meta_by_key.get(pid) or {}
+        # skip noise/validation buckets: a host with zero signal is not a person
+        if tracked == 0 and idle == 0 and presses == 0 and clicks == 0 and host not in meta_by_key and pid not in meta_by_key:
+            continue
         last_seen = slot["lastSeen"]
         online = bool(last_seen and (end - last_seen).total_seconds() < 300)
         top_apps = sorted(app_seconds.items(), key=lambda item: item[1], reverse=True)[:6]
