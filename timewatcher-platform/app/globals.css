@@ -2652,6 +2652,164 @@ h3 {
   white-space: nowrap;
 }
 
+/* Intelligence */
+.gate-card .primary {
+  margin-top: 16px;
+  align-self: flex-start;
+}
+.intel-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.intel-chip {
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: var(--surface);
+  padding: 9px 15px;
+  font-size: 13px;
+  color: var(--ink);
+  cursor: pointer;
+  box-shadow: var(--shadow);
+  transition:
+    border-color 0.15s ease,
+    transform 0.15s ease;
+}
+.intel-chip:hover {
+  border-color: var(--blue);
+  transform: translateY(-1px);
+}
+.intel-ask {
+  display: flex;
+  gap: 12px;
+}
+.intel-ask input {
+  flex: 1;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  padding: 0 18px;
+  height: 46px;
+  font-size: 14px;
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+.intel-ask input:focus {
+  outline: none;
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(63, 123, 255, 0.15);
+}
+.intel-ask .primary {
+  padding: 0 24px;
+}
+.intel-answer {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  gap: 16px;
+  align-items: start;
+  padding: 22px 24px;
+}
+.intel-ai {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 13px;
+  color: #fff;
+  background: var(--brand);
+  box-shadow: 0 8px 22px rgba(63, 123, 255, 0.35);
+}
+.intel-badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--blue);
+  margin-bottom: 6px;
+}
+.intel-answer p {
+  font-size: 16px;
+  line-height: 1.55;
+  color: var(--ink);
+}
+
+/* Intelligence */
+.intel-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.intel-chip {
+  border: 1px solid var(--line-2);
+  border-radius: 20px;
+  background: var(--surface);
+  padding: 9px 16px;
+  font-size: 13px;
+  color: var(--ink);
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+.intel-chip:hover {
+  border-color: var(--blue);
+  background: rgba(63, 123, 255, 0.06);
+}
+.intel-ask {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+}
+.intel-ask input {
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  padding: 0 16px;
+  font-size: 14px;
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+.intel-ask input:focus {
+  outline: none;
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(63, 123, 255, 0.15);
+}
+.intel-answer {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  gap: 16px;
+  padding: 22px 24px;
+}
+.intel-ai {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 14px;
+  color: #fff;
+  background: linear-gradient(135deg, var(--cyan), var(--violet));
+  box-shadow: 0 8px 22px rgba(122, 82, 255, 0.3);
+}
+.intel-badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.intel-answer p {
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--ink);
+}
+
 /* Billing */
 .plan-grid {
   display: grid;

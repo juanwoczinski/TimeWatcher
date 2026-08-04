@@ -16,6 +16,7 @@ type Section =
   | "Pessoas"
   | "Times"
   | "Alertas"
+  | "Intelligence"
   | "Dispositivos"
   | "Atividades"
   | "Relatórios"
@@ -31,6 +32,7 @@ type IconName =
   | "people"
   | "teams"
   | "alerts"
+  | "intelligence"
   | "devices"
   | "activity"
   | "reports"
@@ -181,6 +183,7 @@ const baseNav: { name: Section; icon: IconName }[] = [
   { name: "Pessoas", icon: "people" },
   { name: "Times", icon: "teams" },
   { name: "Alertas", icon: "alerts" },
+  { name: "Intelligence", icon: "intelligence" },
   { name: "Dispositivos", icon: "devices" },
   { name: "Atividades", icon: "activity" },
   { name: "Relatórios", icon: "reports" },
@@ -195,6 +198,7 @@ const desc: Record<Section, string> = {
   Pessoas: "Jornada, atividade, ativos e capturas por colaborador.",
   Times: "Grupos de colaboradores e o gestor responsável por cada um.",
   Alertas: "Agente offline, ociosidade longa e desvios de jornada.",
+  Intelligence: "Pergunte sobre a operação e receba síntese apoiada nos dados.",
   Dispositivos: "Inventário e saúde dos computadores vinculados.",
   Atividades: "Aplicativos, URLs, janelas, atividade e ociosidade.",
   Relatórios: "Filtros e exportações para análise operacional.",
@@ -371,6 +375,13 @@ function Icon({ name }: { name: IconName }) {
         <svg {...p}>
           <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
           <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+        </svg>
+      );
+    case "intelligence":
+      return (
+        <svg {...p}>
+          <path d="M11 3l1.8 4.6L17.5 9.4 12.8 11.2 11 16l-1.8-4.8L4.5 9.4l4.7-1.8z" />
+          <path d="M18 14l.9 2.2 2.1.9-2.1.9L18 20l-.9-2-2.1-.9 2.1-.9z" />
         </svg>
       );
     case "devices":
@@ -662,7 +673,7 @@ function Dashboard() {
   const nav = baseNav.filter((n) => {
     if (n.name === "Empresas") return data?.viewer.role === "super_admin";
     if (n.name === "Usuários" || n.name === "Faturamento") return isAdmin;
-    if (n.name === "Times" || n.name === "Alertas")
+    if (n.name === "Times" || n.name === "Alertas" || n.name === "Intelligence")
       return isAdmin || data?.viewer.role === "manager";
     return true;
   });
@@ -919,6 +930,7 @@ function Content({
   if (active === "Pessoas") return <People d={data} reload={reload} />;
   if (active === "Times") return <Teams d={data} />;
   if (active === "Alertas") return <Alerts d={data} />;
+  if (active === "Intelligence") return <Intelligence d={data} go={setActive} />;
   if (active === "Dispositivos") return <Devices d={data} reload={reload} />;
   if (active === "Atividades") return <Activities d={data} />;
   if (active === "Relatórios")
@@ -1744,6 +1756,127 @@ function PriceEditor({
         </button>
       </div>
     </article>
+  );
+}
+type IntelAnswer = {
+  intent: string;
+  answer: string;
+  suggestions: string[];
+};
+const INTENT_LABEL: Record<string, string> = {
+  top_time: "Concentração de tempo",
+  idle: "Ociosidade",
+  off_schedule: "Aderência à jornada",
+  week_change: "Variação semanal",
+  summary: "Panorama",
+};
+function Intelligence({ d, go }: { d: Data; go: (s: Section) => void }) {
+  void d;
+  const [locked, setLocked] = useState(false);
+  const [ans, setAns] = useState<IntelAnswer | null>(null);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [q, setQ] = useState("");
+  const [busy, setBusy] = useState(false);
+  const ask = useCallback(async (question: string) => {
+    setBusy(true);
+    const r = await fetch(
+      `/platform-api/dashboard/intelligence?q=${encodeURIComponent(question)}`,
+      { credentials: "same-origin" },
+    );
+    setBusy(false);
+    if (r.status === 403) {
+      setLocked(true);
+      return;
+    }
+    if (r.ok) {
+      const x: IntelAnswer = await r.json();
+      setLocked(false);
+      setAns(x);
+      if (x.suggestions) setSuggestions(x.suggestions);
+    }
+  }, []);
+  useEffect(() => {
+    ask("");
+  }, [ask]);
+  if (locked) {
+    return (
+      <div className="page-stack">
+        <article className="card gate-card">
+          <div className="card-head">
+            <div>
+              <h2>TeamWatcher Intelligence (IA)</h2>
+              <p>Disponível no plano Intelligence.</p>
+            </div>
+            <span className="pill offline">Bloqueado</span>
+          </div>
+          <p className="settings-copy">
+            Perguntas em linguagem natural, resumos automáticos e recomendações
+            por evidências, apoiados nos dados da sua operação. Faça upgrade para
+            habilitar.
+          </p>
+          <button className="primary" onClick={() => go("Faturamento")}>
+            Ver planos
+          </button>
+        </article>
+      </div>
+    );
+  }
+  return (
+    <div className="page-stack">
+      <div className="section-summary">
+        <strong>TeamWatcher Intelligence</strong>
+        <span>
+          Pergunte sobre a operação em linguagem natural — a síntese é apoiada
+          nos dados reais do período.
+        </span>
+      </div>
+      <div className="intel-suggestions">
+        {suggestions.map((s) => (
+          <button
+            key={s}
+            className="intel-chip"
+            onClick={() => {
+              setQ(s);
+              ask(s);
+            }}
+          >
+            {s}
+          </button>
+        ))}
+      </div>
+      <div className="intel-ask">
+        <input
+          value={q}
+          placeholder="Pergunte algo sobre a operação…"
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && q.trim()) ask(q);
+          }}
+        />
+        <button
+          className="primary"
+          disabled={busy || !q.trim()}
+          onClick={() => ask(q)}
+        >
+          {busy ? "Pensando…" : "Perguntar"}
+        </button>
+      </div>
+      {ans && (
+        <article className="card intel-answer">
+          <div className="intel-ai">IA</div>
+          <div>
+            <div className="intel-badge">
+              {INTENT_LABEL[ans.intent] || "Análise"}
+            </div>
+            <p>{ans.answer}</p>
+          </div>
+        </article>
+      )}
+      <p className="billing-note">
+        A IA organiza evidências a partir dos dados do período; a decisão continua
+        humana.
+      </p>
+    </div>
   );
 }
 type AlertRow = {

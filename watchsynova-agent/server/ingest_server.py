@@ -748,6 +748,83 @@ def platform_trends(current_viewer: dict, days: int) -> dict:
     return {"days": days, "series": series, "source": "rollup+live"}
 
 
+INTELLIGENCE_SUGGESTIONS = [
+    "Onde o time concentrou mais tempo esta semana?",
+    "Quais padrões de ociosidade merecem atenção?",
+    "Quem está fora da jornada planejada?",
+    "O que mudou em relação aos últimos 7 dias?",
+]
+
+
+def _intent_of(question: str) -> str:
+    q = (question or "").lower()
+    if any(w in q for w in ("ocios", "idle", "parad", "afk")): return "idle"
+    if any(w in q for w in ("jornada", "fora", "offline", "aderenc", "aderĂȘnc", "escala", "atras")): return "off_schedule"
+    if any(w in q for w in ("mudou", "semana anterior", "7 dias", "compar", "tend", "cresc", "cai")): return "week_change"
+    if any(w in q for w in ("tempo", "concentr", "onde", "app", "aplicativ", "site", "url", "foco")): return "top_time"
+    return "summary"
+
+
+def intelligence_answer(current_viewer: dict, question: str) -> dict:
+    """Data-grounded synthesis over the tenant's real metrics (LLM-ready).
+    Gated behind the Intelligence plan."""
+    config = load_config()
+    tenant_id = current_viewer["tenantId"]
+    if not billing_summary(config, tenant_id)["features"]["intelligence"]:
+        raise PermissionError("plan_required")
+    intent = _intent_of(question)
+    answer, data = "", {}
+    if intent == "top_time":
+        dash = dashboard_data({"period": ["7d"]}, current_viewer)
+        apps = dash["apps"][:5]; domains = dash["domains"][:3]
+        if apps:
+            top = ", ".join(f"{a['name']} ({a['duration']})" for a in apps[:3])
+            answer = f"Nos últimos 7 dias, o time concentrou mais tempo em: {top}."
+            if domains:
+                answer += " Entre sites, destaque para " + ", ".join(f"{d['domain']} ({d['duration']})" for d in domains) + "."
+            answer += f" O foco médio ficou em {dash['summary']['focusScore']}%."
+        else:
+            answer = "Ainda não há atividade suficiente nos últimos 7 dias para uma leitura de concentração de tempo."
+        data = {"apps": apps, "domains": domains}
+    elif intent == "idle":
+        people = sorted(people_directory({"period": ["7d"]}, current_viewer)["people"], key=lambda p: p["idleSeconds"], reverse=True)
+        flagged = [p for p in people if p["idleSeconds"] > 0][:5]
+        if flagged:
+            answer = "Maiores volumes de ociosidade nos últimos 7 dias: " + "; ".join(f"{p['name']} ({duration_label(p['idleSeconds'])}, {p['focusScore']}% foco)" for p in flagged) + "."
+        else:
+            answer = "Nenhuma ociosidade relevante registrada nos últimos 7 dias."
+        data = {"people": [{"name": p["name"], "idleSeconds": p["idleSeconds"], "focusScore": p["focusScore"]} for p in flagged]}
+    elif intent == "off_schedule":
+        alerts = compute_alerts(current_viewer)["alerts"]
+        relevant = [a for a in alerts if a["type"] in ("agent_offline", "low_adherence")]
+        if relevant:
+            answer = f"{len(relevant)} pessoa(s) fora do previsto agora: " + "; ".join(f"{a['personName']} — {a['message']}" for a in relevant[:5])
+        else:
+            answer = "Ninguém fora da jornada planejada neste momento — a operação está aderente."
+        data = {"alerts": relevant}
+    elif intent == "week_change":
+        series = platform_trends(current_viewer, 14)["series"]
+        this_week = sum(p["trackedSeconds"] for p in series[-7:]); prev_week = sum(p["trackedSeconds"] for p in series[-14:-7])
+        this_prod = sum(p["productiveSeconds"] for p in series[-7:]); prev_prod = sum(p["productiveSeconds"] for p in series[-14:-7])
+        if prev_week > 0:
+            delta = (this_week - prev_week) / prev_week * 100
+            direction = "subiu" if delta >= 0 else "caiu"
+            answer = f"O tempo monitorado {direction} {abs(delta):.0f}% em relação à semana anterior."
+        else:
+            answer = "Ainda não há histórico suficiente da semana anterior para comparação."
+        fp = round(this_prod / this_week * 100) if this_week else 0
+        answer += f" Nos últimos 7 dias, o foco médio foi {fp}% ({duration_label(this_prod)} produtivos de {duration_label(this_week)})."
+        data = {"thisWeekSeconds": round(this_week), "prevWeekSeconds": round(prev_week)}
+    else:
+        dash = dashboard_data({"period": ["today"]}, current_viewer)
+        s = dash["summary"]; alerts = compute_alerts(current_viewer)["counts"]
+        answer = (f"Hoje: {duration_label(s['trackedSeconds'])} monitorados, {duration_label(s['activeSeconds'])} ativos e {s['focusScore']}% de foco "
+                  f"em {s['deviceCount']} dispositivo(s) ({s['onlineDeviceCount']} online). "
+                  f"{alerts['total']} alerta(s) ativo(s) ({alerts['critical']} crítico(s)).")
+        data = {"summary": s, "alerts": alerts}
+    return {"question": question, "intent": intent, "answer": answer, "data": data, "suggestions": INTELLIGENCE_SUGGESTIONS, "generatedAt": datetime.now(timezone.utc).isoformat()}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "TimeWatcher/2"
 
@@ -796,6 +873,12 @@ class Handler(BaseHTTPRequestHandler):
             key = ("trends", current["role"], current["email"], current["tenantId"], days)
             try: return self.send_json(200, cached(key, lambda: platform_trends(current, days)))
             except Exception as error: return self.send_json(502, {"error": "trends_unavailable", "detail": str(error)[:240]})
+        if parsed.path == "/dashboard/intelligence":
+            question = params.get("q", [""])[0]
+            key = ("intel", current["role"], current["email"], current["tenantId"], question)
+            try: return self.send_json(200, cached(key, lambda: intelligence_answer(current, question)))
+            except PermissionError: return self.send_json(403, {"error": "plan_required"})
+            except Exception as error: return self.send_json(502, {"error": "intelligence_unavailable", "detail": str(error)[:240]})
         if parsed.path == "/dashboard/billing":
             config = load_config(); is_super = current["role"] == "super_admin"
             tenant_id = params.get("tenant", [current["tenantId"]])[0] if is_super else current["tenantId"]
