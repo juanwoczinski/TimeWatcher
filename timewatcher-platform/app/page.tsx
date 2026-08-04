@@ -1768,8 +1768,10 @@ const INTENT_LABEL: Record<string, string> = {
   idle: "Ociosidade",
   off_schedule: "Aderência à jornada",
   week_change: "Variação semanal",
+  recommendations: "Recomendações",
   summary: "Panorama",
 };
+type Digest = { kind: string; period: string; text: string; generatedAt: string };
 function Intelligence({ d, go }: { d: Data; go: (s: Section) => void }) {
   void d;
   const [locked, setLocked] = useState(false);
@@ -1777,6 +1779,13 @@ function Intelligence({ d, go }: { d: Data; go: (s: Section) => void }) {
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
+  const [digests, setDigests] = useState<Digest[]>([]);
+  useEffect(() => {
+    fetch("/platform-api/dashboard/digests", { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((x) => setDigests(x?.digests || []))
+      .catch(() => {});
+  }, []);
   const ask = useCallback(async (question: string) => {
     setBusy(true);
     const r = await fetch(
@@ -1871,6 +1880,26 @@ function Intelligence({ d, go }: { d: Data; go: (s: Section) => void }) {
             <p>{ans.answer}</p>
           </div>
         </article>
+      )}
+      {digests.length > 0 && (
+        <div className="digest-section">
+          <div className="digest-head">Resumos automáticos</div>
+          <div className="digest-list">
+            {digests.map((dg) => (
+              <article className="card digest-card" key={dg.kind + dg.period}>
+                <div className="digest-meta">
+                  <span
+                    className={`pill ${dg.kind === "daily" ? "online" : "offline"}`}
+                  >
+                    {dg.kind === "daily" ? "Diário" : "Semanal"}
+                  </span>
+                  <span>{dg.period}</span>
+                </div>
+                <p>{dg.text}</p>
+              </article>
+            ))}
+          </div>
+        </div>
       )}
       <p className="billing-note">
         A IA organiza evidências a partir dos dados do período; a decisão continua

@@ -753,11 +753,13 @@ INTELLIGENCE_SUGGESTIONS = [
     "Quais padrões de ociosidade merecem atenção?",
     "Quem está fora da jornada planejada?",
     "O que mudou em relação aos últimos 7 dias?",
+    "Quais são as recomendações prioritárias?",
 ]
 
 
 def _intent_of(question: str) -> str:
     q = (question or "").lower()
+    if any(w in q for w in ("recomend", "prioriz", "priorit", "sugest", "o que fazer", "acoes", "ações", "plano de acao")): return "recommendations"
     if any(w in q for w in ("ocios", "idle", "parad", "afk")): return "idle"
     if any(w in q for w in ("jornada", "fora", "offline", "aderenc", "aderĂȘnc", "escala", "atras")): return "off_schedule"
     if any(w in q for w in ("mudou", "semana anterior", "7 dias", "compar", "tend", "cresc", "cai")): return "week_change"
@@ -861,6 +863,20 @@ def intelligence_answer(current_viewer: dict, question: str) -> dict:
         fp = round(this_prod / this_week * 100) if this_week else 0
         answer += f" Nos últimos 7 dias, o foco médio foi {fp}% ({duration_label(this_prod)} produtivos de {duration_label(this_week)})."
         data = {"thisWeekSeconds": round(this_week), "prevWeekSeconds": round(prev_week)}
+    elif intent == "recommendations":
+        people = sorted(people_directory({"period": ["7d"]}, current_viewer)["people"], key=lambda p: p["idleSeconds"], reverse=True)
+        active_alerts = compute_alerts(current_viewer)["alerts"]
+        recs = []
+        if active_alerts:
+            recs.append(f"Tratar {len(active_alerts)} alerta(s) ativo(s), começando por " + ", ".join(a["personName"] for a in active_alerts[:3]) + ".")
+        idle = [p for p in people if p["idleSeconds"] > 0][:3]
+        if idle:
+            recs.append("Revisar ociosidade de " + ", ".join(f"{p['name']} ({duration_label(p['idleSeconds'])})" for p in idle) + " — confirmar se são pausas legítimas.")
+        low = [p for p in people if p["focusScore"] < 50 and p["trackedSeconds"] > 0][:3]
+        if low:
+            recs.append("Apoiar quem está com foco baixo: " + ", ".join(f"{p['name']} ({p['focusScore']}%)" for p in low) + ".")
+        answer = ("Recomendações prioritárias: " + " ".join(f"{i+1}) {r}" for i, r in enumerate(recs))) if recs else "Operação saudável — sem ações prioritárias no momento."
+        data = {"recommendations": recs}
     else:
         dash = dashboard_data({"period": ["today"]}, current_viewer)
         s = dash["summary"]; alerts = compute_alerts(current_viewer)["counts"]
@@ -877,6 +893,61 @@ def intelligence_answer(current_viewer: dict, question: str) -> dict:
         except Exception:
             pass
     return result
+
+
+DIGESTS_FILE = DATA_DIR / "digests.json"
+_DIGEST_LOCK = threading.Lock()
+
+
+def load_digests() -> dict:
+    try:
+        return json.loads(DIGESTS_FILE.read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_digests(data: dict) -> None:
+    tmp = DIGESTS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+    tmp.replace(DIGESTS_FILE)
+
+
+def generate_and_store_digests() -> None:
+    """Auto daily/weekly executive summaries per Intelligence tenant."""
+    config = load_config()
+    now_local = datetime.now(timezone.utc).astimezone(LOCAL_TIMEZONE)
+    with _DIGEST_LOCK:
+        store = load_digests()
+    for tenant in config.get("tenants", []):
+        tid = tenant["id"]
+        if not billing_summary(config, tid)["features"]["intelligence"]:
+            continue
+        viewer = {"role": "super_admin", "tenantId": tid, "email": "system", "name": "system", "username": "system"}
+        jobs = [
+            ("daily", now_local.date().isoformat(), "Faça um resumo executivo do DIA de hoje da operação, com destaques e 2 a 3 recomendações objetivas."),
+            ("weekly", now_local.strftime("%Y-S%V"), "Faça um resumo executivo da SEMANA da operação, com tendência, destaques e 2 a 3 recomendações."),
+        ]
+        for kind, period_key, question in jobs:
+            try:
+                text = intelligence_answer(viewer, question)["answer"]
+            except Exception:
+                continue
+            store.setdefault(tid, {})[f"{kind}:{period_key}"] = {"kind": kind, "period": period_key, "text": text, "generatedAt": datetime.now(timezone.utc).isoformat()}
+        entries = store.get(tid, {})
+        if len(entries) > 40:
+            for old in sorted(entries, key=lambda k: entries[k]["generatedAt"])[:-40]:
+                entries.pop(old, None)
+    with _DIGEST_LOCK:
+        save_digests(store)
+
+
+def digest_worker() -> None:
+    while True:
+        try:
+            generate_and_store_digests()
+        except Exception:
+            pass
+        time.sleep(6 * 3600)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -933,6 +1004,9 @@ class Handler(BaseHTTPRequestHandler):
             try: return self.send_json(200, cached(key, lambda: intelligence_answer(current, question)))
             except PermissionError: return self.send_json(403, {"error": "plan_required"})
             except Exception as error: return self.send_json(502, {"error": "intelligence_unavailable", "detail": str(error)[:240]})
+        if parsed.path == "/dashboard/digests":
+            entries = sorted(load_digests().get(current["tenantId"], {}).values(), key=lambda e: e["generatedAt"], reverse=True)
+            return self.send_json(200, {"digests": entries[:12], "intelligence": billing_summary(load_config(), current["tenantId"])["features"]["intelligence"]})
         if parsed.path == "/dashboard/billing":
             config = load_config(); is_super = current["role"] == "super_admin"
             tenant_id = params.get("tenant", [current["tenantId"]])[0] if is_super else current["tenantId"]
@@ -1342,4 +1416,5 @@ if __name__ == "__main__":
     DATA_DIR.mkdir(parents=True, exist_ok=True); load_config(); session_secret(); bootstrap_admin()
     threading.Thread(target=retention_worker, daemon=True).start()
     threading.Thread(target=rollup_worker, daemon=True).start()
+    threading.Thread(target=digest_worker, daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", 5610), Handler).serve_forever()

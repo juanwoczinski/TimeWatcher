@@ -2735,6 +2735,40 @@ h3 {
   line-height: 1.55;
   color: var(--ink);
 }
+.digest-section {
+  margin-top: 6px;
+}
+.digest-head {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+.digest-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+}
+.digest-card {
+  padding: 16px 18px;
+}
+.digest-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--faint);
+  font-family: var(--data);
+}
+.digest-card p {
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink);
+  white-space: pre-wrap;
+}
 
 /* Intelligence */
 .intel-suggestions {
