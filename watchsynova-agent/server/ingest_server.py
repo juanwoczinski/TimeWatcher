@@ -765,6 +765,52 @@ def _intent_of(question: str) -> str:
     return "summary"
 
 
+def intelligence_snapshot(current_viewer: dict) -> dict:
+    """Compact, aggregate-only operational snapshot fed to the LLM (never raw content)."""
+    dash = dashboard_data({"period": ["7d"]}, current_viewer)
+    people = sorted(people_directory({"period": ["7d"]}, current_viewer)["people"], key=lambda p: p["idleSeconds"], reverse=True)
+    alerts = compute_alerts(current_viewer)
+    series = platform_trends(current_viewer, 14)["series"]
+    this_week = sum(p["trackedSeconds"] for p in series[-7:]); prev_week = sum(p["trackedSeconds"] for p in series[-14:-7])
+    return {
+        "periodo": "ultimos 7 dias",
+        "resumo": {"monitorado": duration_label(dash["summary"]["trackedSeconds"]), "ativo": duration_label(dash["summary"]["activeSeconds"]),
+                   "foco_pct": dash["summary"]["focusScore"], "dispositivos": dash["summary"]["deviceCount"], "online": dash["summary"]["onlineDeviceCount"]},
+        "apps_mais_usados": [{"app": a["name"], "tempo": a["duration"], "classe": a["classification"]} for a in dash["apps"][:6]],
+        "sites_mais_usados": [{"site": d["domain"], "tempo": d["duration"]} for d in dash["domains"][:4]],
+        "maior_ociosidade": [{"pessoa": p["name"], "ocioso": duration_label(p["idleSeconds"]), "foco_pct": p["focusScore"]} for p in people[:5] if p["idleSeconds"] > 0],
+        "alertas": [{"tipo": a["type"], "pessoa": a["personName"], "mensagem": a["message"]} for a in alerts["alerts"][:8]],
+        "variacao_semana": {"esta_semana": duration_label(this_week), "semana_anterior": duration_label(prev_week)},
+    }
+
+
+def llm_answer(question: str, snapshot: dict) -> str | None:
+    """Natural-language answer via Amazon Bedrock (Anthropic). Returns None on any
+    failure so the caller falls back to the deterministic engine."""
+    if os.environ.get("TIMEWATCHER_LLM") != "bedrock":
+        return None
+    try:
+        import boto3
+        model = os.environ.get("TIMEWATCHER_BEDROCK_MODEL", "anthropic.claude-3-haiku-20240307-v1:0")
+        client = boto3.client("bedrock-runtime", region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
+        prompt = (
+            "Voce e o analista do TeamWatcher, uma plataforma de gestao de produtividade. "
+            "Responda em portugues do Brasil, de forma objetiva e executiva (2 a 4 frases), a pergunta do gestor. "
+            "Use SOMENTE os dados do snapshot abaixo; nunca invente numeros, nomes ou fatos. Se o dado nao existir, diga que nao ha base. "
+            "Nao ha conteudo digitado nos dados (privacidade/LGPD); nao mencione isso a menos que perguntem.\n\n"
+            f"Pergunta: {question or 'Faca um resumo executivo da operacao.'}\n\n"
+            f"Snapshot (JSON):\n{json.dumps(snapshot, ensure_ascii=False)}"
+        )
+        body = {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 400, "temperature": 0.2,
+                "messages": [{"role": "user", "content": prompt}]}
+        response = client.invoke_model(modelId=model, body=json.dumps(body))
+        payload = json.loads(response["body"].read())
+        text = "".join(part.get("text", "") for part in payload.get("content", [])).strip()
+        return text or None
+    except Exception:
+        return None
+
+
 def intelligence_answer(current_viewer: dict, question: str) -> dict:
     """Data-grounded synthesis over the tenant's real metrics (LLM-ready).
     Gated behind the Intelligence plan."""
@@ -822,7 +868,15 @@ def intelligence_answer(current_viewer: dict, question: str) -> dict:
                   f"em {s['deviceCount']} dispositivo(s) ({s['onlineDeviceCount']} online). "
                   f"{alerts['total']} alerta(s) ativo(s) ({alerts['critical']} crítico(s)).")
         data = {"summary": s, "alerts": alerts}
-    return {"question": question, "intent": intent, "answer": answer, "data": data, "suggestions": INTELLIGENCE_SUGGESTIONS, "generatedAt": datetime.now(timezone.utc).isoformat()}
+    result = {"question": question, "intent": intent, "answer": answer, "data": data, "suggestions": INTELLIGENCE_SUGGESTIONS, "generatedAt": datetime.now(timezone.utc).isoformat(), "source": "rules"}
+    if os.environ.get("TIMEWATCHER_LLM") == "bedrock":
+        try:
+            generated = llm_answer(question, intelligence_snapshot(current_viewer))
+            if generated:
+                result["answer"] = generated; result["source"] = "llm"
+        except Exception:
+            pass
+    return result
 
 
 class Handler(BaseHTTPRequestHandler):
