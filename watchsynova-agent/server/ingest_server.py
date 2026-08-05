@@ -615,7 +615,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
         if person.get("tenantId") != tenant_id: continue
         meta_by_key[person.get("host") or person.get("id")] = person
 
-    people = []
+    people = []; used_person_ids: set = set()
     for host, slot in sorted(hosts.items()):
         app_seconds: dict = defaultdict(float); page_seconds: dict = defaultdict(float); page_titles: dict = {}; tracked = 0.0; recent_activity = []
         for bucket_id in slot["window"]:
@@ -654,11 +654,13 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
         top_apps = sorted(app_seconds.items(), key=lambda item: item[1], reverse=True)[:6]
         top_urls = sorted(page_seconds.items(), key=lambda item: item[1], reverse=True)[:8]
         recent_activity.sort(key=lambda item: item.get("timestamp") or "", reverse=True)
+        if meta.get("id"): used_person_ids.add(meta["id"])
         people.append({
-            "id": pid, "host": host,
+            "id": meta.get("id") or pid, "host": host,
             "name": meta.get("name") or host.replace(".local", ""),
             "title": meta.get("title") or "Colaborador",
-            "teamId": meta.get("teamId"), "scheduleId": meta.get("scheduleId"),
+            "teamId": meta.get("teamId"), "ouId": meta.get("ouId") or meta.get("teamId"), "scheduleId": meta.get("scheduleId"),
+            "email": meta.get("email"), "licenseType": meta.get("licenseType"), "registered": bool(meta), "hasTelemetry": True,
             "device": host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop",
             "status": "online" if online else "offline", "lastSeen": last_seen.isoformat() if last_seen else None,
             "trackedSeconds": round(tracked, 3), "activeSeconds": round(active, 3), "idleSeconds": round(idle, 3),
@@ -667,6 +669,21 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
             "topApps": [{"name": app, "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": classify(app, rules)} for app, seconds in top_apps],
             "topUrls": [{"url": url, "domain": urllib.parse.urlsplit(url).hostname or url, "title": page_titles.get(url, ""), "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": classify(urllib.parse.urlsplit(url).hostname or url, rules)} for url, seconds in top_urls],
             "recentActivity": recent_activity[:40],
+        })
+    # registered people without telemetry (or not yet linked to a host) still belong in the roster
+    for person in config.get("people", []):
+        if person.get("tenantId") != tenant_id or person.get("id") in used_person_ids: continue
+        if is_manager and person.get("teamId") not in managed: continue
+        host = person.get("host")
+        people.append({
+            "id": person["id"], "host": host,
+            "name": person.get("name") or person["id"], "title": person.get("title") or "Colaborador",
+            "teamId": person.get("teamId"), "ouId": person.get("ouId") or person.get("teamId"), "scheduleId": person.get("scheduleId"),
+            "email": person.get("email"), "licenseType": person.get("licenseType"), "registered": True, "hasTelemetry": False,
+            "device": (host or "").replace(".local", "") or "—", "platform": "—",
+            "status": "offline", "lastSeen": None,
+            "trackedSeconds": 0, "activeSeconds": 0, "idleSeconds": 0, "productiveSeconds": 0, "focusScore": 0,
+            "presses": 0, "clicks": 0, "topApps": [], "topUrls": [], "recentActivity": [],
         })
     people.sort(key=lambda person: (person["status"] != "online", person["name"].lower()))
     tenant = next((t for t in config["tenants"] if t["id"] == tenant_id), {"id": tenant_id, "name": tenant_id})
@@ -1157,19 +1174,35 @@ class Handler(BaseHTTPRequestHandler):
                         if person["id"] in ids and (current["role"] == "super_admin" or person["tenantId"] == current["tenantId"]): person["scheduleId"] = schedule_id
                     save_config(config); return self.send_json(200, {"updated": len(ids)})
                 if parsed.path == "/dashboard/people":
-                    host = str(payload.get("host") or payload.get("id") or "").strip()
-                    if not host: return self.send_json(400, {"error": "host_required"})
-                    pid = re.sub(r"[^a-z0-9-]", "-", host.lower()).strip("-") or "host"
+                    host = str(payload.get("host") or "").strip()
+                    ref_id = str(payload.get("id") or "").strip()
+                    name = str(payload.get("name") or "").strip()
+                    if not (host or ref_id or name): return self.send_json(400, {"error": "name_required"})
                     p_tenant = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
                     people = config.setdefault("people", [])
-                    entry = next((p for p in people if p.get("tenantId") == p_tenant and (p.get("host") == host or p.get("id") == pid)), None)
+                    entry = None
+                    if ref_id: entry = next((p for p in people if p.get("tenantId") == p_tenant and p.get("id") == ref_id), None)
+                    if entry is None and host: entry = next((p for p in people if p.get("tenantId") == p_tenant and p.get("host") == host), None)
                     if entry is None:
-                        entry = {"id": pid, "tenantId": p_tenant, "host": host}; people.append(entry)
-                    for field in ("name", "title"):
+                        seed = ref_id or host or name
+                        new_id = re.sub(r"[^a-z0-9-]", "-", seed.lower()).strip("-") or "pessoa"
+                        existing = {p.get("id") for p in people if p.get("tenantId") == p_tenant}
+                        base, n = new_id, 2
+                        while new_id in existing: new_id = f"{base}-{n}"; n += 1
+                        entry = {"id": new_id, "tenantId": p_tenant}; people.append(entry)
+                    if host: entry["host"] = host
+                    for field in ("name", "title", "email"):
                         if payload.get(field) is not None: entry[field] = str(payload[field])[:120]
-                    for field in ("teamId", "scheduleId"):
+                    for field in ("teamId", "ouId", "scheduleId"):
                         if field in payload: entry[field] = payload[field] or None
-                    save_config(config); audit("person.update", current["email"], {"id": pid}); return self.send_json(200, entry)
+                    if "licenseType" in payload:
+                        entry["licenseType"] = payload["licenseType"] if payload.get("licenseType") in ("essential", "intelligence") else None
+                    save_config(config); audit("person.update", current["email"], {"id": entry["id"]}); return self.send_json(200, entry)
+                if parsed.path == "/dashboard/people/delete":
+                    ref_id = str(payload.get("id") or "").strip()
+                    before = len(config.get("people", []))
+                    config["people"] = [p for p in config.get("people", []) if not (p.get("id") == ref_id and (current["role"] == "super_admin" or p.get("tenantId") == current["tenantId"]))]
+                    save_config(config); audit("person.delete", current["email"], {"id": ref_id}); return self.send_json(200, {"deleted": before - len(config.get("people", []))})
                 if parsed.path == "/dashboard/teams":
                     name = str(payload.get("name", "")).strip()
                     if not name: return self.send_json(400, {"error": "name_required"})

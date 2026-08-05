@@ -1226,13 +1226,25 @@ function Companies({ d, reload }: { d: Data; reload: () => void }) {
     </div>
   );
 }
+type DirActivity = {
+  timestamp: string | null;
+  kind: "app" | "url";
+  app: string;
+  title: string;
+  url?: string;
+  duration: string;
+};
 type DirPerson = {
   id: string;
-  host: string;
+  host: string | null;
   name: string;
   title: string;
   teamId: string | null;
   scheduleId: string | null;
+  email?: string | null;
+  licenseType?: "essential" | "intelligence" | null;
+  registered?: boolean;
+  hasTelemetry?: boolean;
   device: string;
   platform: string;
   status: "online" | "offline";
@@ -1250,6 +1262,14 @@ type DirPerson = {
     duration: string;
     classification: App["classification"];
   }[];
+  topUrls?: {
+    url: string;
+    domain: string;
+    title: string;
+    duration: string;
+    classification: App["classification"];
+  }[];
+  recentActivity?: DirActivity[];
 };
 type Directory = {
   tenant: Tenant;
@@ -1257,6 +1277,10 @@ type Directory = {
   schedules: Schedule[];
   teams: { id: string; name: string }[];
   counts: { people: number; online: number };
+};
+const LICENSE_LABEL: Record<string, string> = {
+  essential: "Essential",
+  intelligence: "Intelligence · IA",
 };
 function initials(name: string) {
   return (
@@ -1269,6 +1293,10 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [invite, setInvite] = useState<{ email: string; url: string } | null>(
+    null,
+  );
   const canEdit =
     d.viewer.role === "super_admin" || d.viewer.role === "org_admin";
 
@@ -1287,48 +1315,110 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
     return (
       !t ||
       person.name.toLowerCase().includes(t) ||
-      person.host.toLowerCase().includes(t) ||
+      (person.host || "").toLowerCase().includes(t) ||
+      (person.email || "").toLowerCase().includes(t) ||
       teamName(person.teamId).toLowerCase().includes(t)
     );
   });
   const current = people.find((person) => person.id === selected) || null;
 
-  async function save(person: DirPerson, patch: Partial<DirPerson>) {
-    setSaving(true);
-    await fetch("/platform-api/dashboard/people", {
+  async function post(path: string, body: object) {
+    const r = await fetch(`/platform-api/dashboard/${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ host: person.host, id: person.id, ...patch }),
+      credentials: "same-origin",
+      body: JSON.stringify(body),
     });
+    return r.ok ? r.json() : null;
+  }
+  async function save(person: DirPerson, patch: Partial<DirPerson>) {
+    setSaving(true);
+    await post("people", { id: person.id, host: person.host, ...patch });
     setSaving(false);
     setEditing(null);
     await load();
     reload();
+  }
+  async function create(payload: Partial<DirPerson>) {
+    setSaving(true);
+    const created = await post("people", payload);
+    setSaving(false);
+    setAdding(false);
+    await load();
+    if (created?.id) setSelected(created.id);
+  }
+  async function remove(id: string) {
+    if (!confirm("Remover esta pessoa do cadastro?")) return;
+    await post("people/delete", { id });
+    setSelected(null);
+    load();
+  }
+  async function grantAccess(email: string, role: string) {
+    const x = await post("invites", { email, role });
+    if (x?.inviteUrl) setInvite({ email, url: x.inviteUrl });
   }
 
   return (
     <div className="page-stack">
       <div className="people-toolbar">
         <div className="section-summary">
-          <strong>
-            {dir?.counts.people ?? 0} colaborador(es) monitorado(s)
-          </strong>
+          <strong>{dir?.counts.people ?? 0} pessoa(s)</strong>
           <span>
-            {dir?.counts.online ?? 0} online agora · diretório derivado da
-            telemetria real do agente.
+            {dir?.counts.online ?? 0} online agora · cadastro + telemetria do
+            agente por colaborador.
           </span>
         </div>
         <input
           className="people-search"
-          placeholder="Buscar por nome, dispositivo ou time…"
+          placeholder="Buscar por nome, e-mail, dispositivo ou time…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
+        {canEdit && (
+          <button
+            className="primary people-add-btn"
+            onClick={() => setAdding((a) => !a)}
+          >
+            {adding ? "Fechar" : "+ Cadastrar pessoa"}
+          </button>
+        )}
       </div>
+      {adding && canEdit && (
+        <PersonCreate
+          teams={dir?.teams || []}
+          saving={saving}
+          onCreate={create}
+        />
+      )}
+      {invite && (
+        <div className="invite-link">
+          <span>Acesso concedido a {invite.email} — envie o magic link:</span>
+          <div className="invite-link-row">
+            <code>{invite.url}</code>
+            <button
+              className="btn ghost"
+              onClick={() => {
+                navigator.clipboard?.writeText(invite.url);
+              }}
+            >
+              Copiar
+            </button>
+            <button className="btn ghost" onClick={() => setInvite(null)}>
+              Fechar
+            </button>
+          </div>
+        </div>
+      )}
       {!dir ? (
-        <State text="Carregando diretório…" />
+        <State text="Carregando pessoas…" />
       ) : people.length === 0 ? (
-        <State text="Nenhum colaborador com telemetria neste período." />
+        <State
+          text={
+            canEdit
+              ? "Nenhuma pessoa ainda — cadastre a primeira."
+              : "Nenhuma pessoa neste período."
+          }
+        />
       ) : (
         <div className="roster">
           {people.map((person) => (
@@ -1348,6 +1438,21 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
                   </small>
                 </div>
                 <span className={`pill ${person.status}`}>{person.status}</span>
+              </div>
+              <div className="person-tags">
+                {person.licenseType ? (
+                  <span
+                    className={`lic-tag ${person.licenseType}`}
+                    title="Licença"
+                  >
+                    {LICENSE_LABEL[person.licenseType]}
+                  </span>
+                ) : (
+                  <span className="lic-tag none">Sem licença</span>
+                )}
+                {!person.hasTelemetry && (
+                  <span className="lic-tag idle">Sem telemetria</span>
+                )}
               </div>
               <dl className="person-stats">
                 <div>
@@ -1378,9 +1483,15 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
               <h2>{current.name}</h2>
               <p>
                 {current.title} · {current.device} · {teamName(current.teamId)}
+                {current.email ? ` · ${current.email}` : ""}
               </p>
             </div>
             <div className="head-actions">
+              {current.licenseType && (
+                <span className={`lic-tag ${current.licenseType}`}>
+                  {LICENSE_LABEL[current.licenseType]}
+                </span>
+              )}
               <span className={`pill ${current.status}`}>{current.status}</span>
               {canEdit && (
                 <button
@@ -1401,6 +1512,10 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
               schedules={dir?.schedules || []}
               saving={saving}
               onSave={(patch) => save(current, patch)}
+              onGrantAccess={(role) =>
+                current.email ? grantAccess(current.email, role) : undefined
+              }
+              onRemove={() => remove(current.id)}
             />
           )}
           <div className="person-detail">
@@ -1451,6 +1566,41 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
               <State text="Sem atividade de apps neste período." />
             )}
           </div>
+          {current.topUrls && current.topUrls.length > 0 && (
+            <div className="person-apps">
+              <h3>Sites mais acessados</h3>
+              {current.topUrls.map((u) => (
+                <div className="app-row" key={u.url}>
+                  <span>
+                    <Glyph domain={u.domain} label={u.domain} kind="site" />
+                    <strong>{u.domain}</strong>
+                  </span>
+                  <span>
+                    <em className={`classification ${u.classification}`}>
+                      {classLabel[u.classification]}
+                    </em>
+                  </span>
+                  <span>{u.duration}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {current.recentActivity && current.recentActivity.length > 0 && (
+            <div className="person-apps">
+              <h3>Atividade recente</h3>
+              <div className="activity-feed">
+                {current.recentActivity.slice(0, 14).map((it, i) => (
+                  <div className="activity-row" key={i}>
+                    <span className="activity-time">{date(it.timestamp)}</span>
+                    <span className="activity-what">
+                      {it.kind === "url" ? it.url || it.title : it.app}
+                    </span>
+                    <span className="activity-dur">{it.duration}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           {(() => {
             const device =
               d.devices.find((x) => x.id === current.host) ||
@@ -1468,73 +1618,198 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
     </div>
   );
 }
+function PersonCreate({
+  teams,
+  saving,
+  onCreate,
+}: {
+  teams: { id: string; name: string }[];
+  saving: boolean;
+  onCreate: (payload: Partial<DirPerson>) => void;
+}) {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [title, setTitle] = useState("");
+  const [teamId, setTeamId] = useState("");
+  const [licenseType, setLicenseType] = useState("");
+  return (
+    <article className="card person-create">
+      <div className="card-head">
+        <div>
+          <h2>Cadastrar pessoa</h2>
+          <p>O agente se vincula depois pelo dispositivo.</p>
+        </div>
+      </div>
+      <div className="person-edit">
+        <label>
+          Nome
+          <input value={name} onChange={(e) => setName(e.target.value)} />
+        </label>
+        <label>
+          E-mail
+          <input value={email} onChange={(e) => setEmail(e.target.value)} />
+        </label>
+        <label>
+          Cargo
+          <input value={title} onChange={(e) => setTitle(e.target.value)} />
+        </label>
+        <label>
+          Time
+          <select value={teamId} onChange={(e) => setTeamId(e.target.value)}>
+            <option value="">Sem time</option>
+            {teams.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Licença
+          <select
+            value={licenseType}
+            onChange={(e) => setLicenseType(e.target.value)}
+          >
+            <option value="">Sem licença</option>
+            <option value="essential">Essential</option>
+            <option value="intelligence">Intelligence · IA</option>
+          </select>
+        </label>
+        <button
+          className="primary"
+          disabled={saving || !name.trim()}
+          onClick={() =>
+            onCreate({
+              name,
+              email: email || null,
+              title: title || null,
+              teamId: teamId || null,
+              licenseType: (licenseType || null) as DirPerson["licenseType"],
+            })
+          }
+        >
+          {saving ? "Cadastrando…" : "Cadastrar"}
+        </button>
+      </div>
+    </article>
+  );
+}
 function PersonEditor({
   person,
   teams,
   schedules,
   saving,
   onSave,
+  onGrantAccess,
+  onRemove,
 }: {
   person: DirPerson;
   teams: { id: string; name: string }[];
   schedules: Schedule[];
   saving: boolean;
   onSave: (patch: Partial<DirPerson>) => void;
+  onGrantAccess: (role: string) => void;
+  onRemove: () => void;
 }) {
   const [name, setName] = useState(person.name);
   const [title, setTitle] = useState(person.title);
+  const [email, setEmail] = useState(person.email || "");
   const [teamId, setTeamId] = useState(person.teamId || "");
   const [scheduleId, setScheduleId] = useState(person.scheduleId || "");
+  const [licenseType, setLicenseType] = useState(person.licenseType || "");
+  const [accessRole, setAccessRole] = useState("member");
   return (
-    <div className="person-edit">
-      <label>
-        Nome
-        <input value={name} onChange={(e) => setName(e.target.value)} />
-      </label>
-      <label>
-        Cargo
-        <input value={title} onChange={(e) => setTitle(e.target.value)} />
-      </label>
-      <label>
-        Time
-        <select value={teamId} onChange={(e) => setTeamId(e.target.value)}>
-          <option value="">Sem time</option>
-          {teams.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.name}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        Jornada
-        <select
-          value={scheduleId}
-          onChange={(e) => setScheduleId(e.target.value)}
+    <>
+      <div className="person-edit">
+        <label>
+          Nome
+          <input value={name} onChange={(e) => setName(e.target.value)} />
+        </label>
+        <label>
+          Cargo
+          <input value={title} onChange={(e) => setTitle(e.target.value)} />
+        </label>
+        <label>
+          E-mail
+          <input value={email} onChange={(e) => setEmail(e.target.value)} />
+        </label>
+        <label>
+          Time
+          <select value={teamId} onChange={(e) => setTeamId(e.target.value)}>
+            <option value="">Sem time</option>
+            {teams.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Jornada
+          <select
+            value={scheduleId}
+            onChange={(e) => setScheduleId(e.target.value)}
+          >
+            <option value="">Sem jornada</option>
+            {schedules.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name} · {s.start}–{s.end}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Licença
+          <select
+            value={licenseType}
+            onChange={(e) => setLicenseType(e.target.value)}
+          >
+            <option value="">Sem licença</option>
+            <option value="essential">Essential</option>
+            <option value="intelligence">Intelligence · IA</option>
+          </select>
+        </label>
+        <button
+          className="primary"
+          disabled={saving}
+          onClick={() =>
+            onSave({
+              name,
+              title,
+              email: email || null,
+              teamId: teamId || null,
+              scheduleId: scheduleId || null,
+              licenseType: (licenseType || null) as DirPerson["licenseType"],
+            })
+          }
         >
-          <option value="">Sem jornada</option>
-          {schedules.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name} · {s.start}–{s.end}
-            </option>
-          ))}
-        </select>
-      </label>
-      <button
-        className="primary"
-        disabled={saving}
-        onClick={() =>
-          onSave({
-            name,
-            title,
-            teamId: teamId || null,
-            scheduleId: scheduleId || null,
-          })
-        }
-      >
-        {saving ? "Salvando…" : "Salvar"}
-      </button>
-    </div>
+          {saving ? "Salvando…" : "Salvar"}
+        </button>
+      </div>
+      <div className="person-edit-actions">
+        <div className="grant-access">
+          <span>Conceder acesso à plataforma:</span>
+          <select
+            value={accessRole}
+            onChange={(e) => setAccessRole(e.target.value)}
+          >
+            <option value="member">Membro (vê só o próprio)</option>
+            <option value="manager">Gestor</option>
+            <option value="admin">Administrador</option>
+          </select>
+          <button
+            className="btn ghost"
+            disabled={!email.trim()}
+            onClick={() => onGrantAccess(accessRole)}
+          >
+            Gerar convite
+          </button>
+        </div>
+        <button className="btn ghost danger" onClick={onRemove}>
+          Remover pessoa
+        </button>
+      </div>
+    </>
   );
 }
 type BillingData = {

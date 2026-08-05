@@ -2278,9 +2278,106 @@ h3 {
 /* People directory */
 .people-toolbar {
   display: grid;
-  grid-template-columns: 1fr minmax(220px, 320px);
+  grid-template-columns: 1fr minmax(200px, 300px) auto;
   gap: 14px;
   align-items: stretch;
+}
+.people-add-btn {
+  white-space: nowrap;
+  align-self: center;
+}
+.person-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+.lic-tag {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 3px 9px;
+  border-radius: 20px;
+}
+.lic-tag.intelligence {
+  color: var(--violet);
+  background: rgba(122, 82, 255, 0.13);
+}
+.lic-tag.essential {
+  color: var(--blue);
+  background: rgba(63, 123, 255, 0.13);
+}
+.lic-tag.none {
+  color: var(--faint);
+  background: var(--slate-bg);
+}
+.lic-tag.idle {
+  color: var(--warn);
+  background: var(--warn-bg);
+}
+.person-create {
+  padding: 20px 22px;
+}
+.person-edit-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin: 12px 0 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg);
+}
+.grant-access {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--muted);
+}
+.grant-access select {
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  padding: 7px 9px;
+  font-size: 13px;
+  color: var(--ink);
+}
+.activity-feed {
+  display: flex;
+  flex-direction: column;
+}
+.activity-row {
+  display: grid;
+  grid-template-columns: 130px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 2px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
+.activity-time {
+  color: var(--faint);
+  font-family: var(--data);
+}
+.activity-what {
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.activity-dur {
+  color: var(--muted);
+  font-family: var(--data);
+}
+@media (max-width: 720px) {
+  .people-toolbar {
+    grid-template-columns: 1fr;
+  }
 }
 .people-search {
   border: 1px solid var(--line-2);
