@@ -22,7 +22,7 @@ type Section =
   | "Atividades"
   | "Relatórios"
   | "Instaladores"
-  | "Usuários"
+  | "Acessos"
   | "Faturamento"
   | "Configurações"
   | "Minha conta";
@@ -189,7 +189,7 @@ const baseNav: { name: Section; icon: IconName }[] = [
   { name: "Atividades", icon: "activity" },
   { name: "Relatórios", icon: "reports" },
   { name: "Instaladores", icon: "installers" },
-  { name: "Usuários", icon: "userplus" },
+  { name: "Acessos", icon: "userplus" },
   { name: "Faturamento", icon: "billing" },
   { name: "Configurações", icon: "settings" },
 ];
@@ -204,7 +204,7 @@ const desc: Record<Section, string> = {
   Atividades: "Aplicativos, URLs, janelas, atividade e ociosidade.",
   Relatórios: "Filtros e exportações para análise operacional.",
   Instaladores: "Distribuição individual ou em massa vinculada ao tenant.",
-  Usuários: "Convites e contas de acesso da sua empresa.",
+  Acessos: "Contas de login na plataforma e papéis. O cadastro de colaboradores fica em Pessoas.",
   Faturamento: "Plano, assentos e cobrança por licença.",
   Configurações: "Políticas de coleta, classificação e privacidade.",
   "Minha conta": "Perfil, segurança e preferências da sua conta.",
@@ -673,7 +673,7 @@ function Dashboard() {
     data?.viewer.role === "super_admin" || data?.viewer.role === "org_admin";
   const nav = baseNav.filter((n) => {
     if (n.name === "Empresas") return data?.viewer.role === "super_admin";
-    if (n.name === "Usuários" || n.name === "Faturamento") return isAdmin;
+    if (n.name === "Acessos" || n.name === "Faturamento") return isAdmin;
     if (n.name === "OUs" || n.name === "Alertas" || n.name === "Intelligence")
       return isAdmin || data?.viewer.role === "manager";
     return true;
@@ -946,7 +946,7 @@ function Content({
       />
     );
   if (active === "Instaladores") return <Installers d={data} />;
-  if (active === "Usuários") return <Users d={data} />;
+  if (active === "Acessos") return <Users d={data} />;
   if (active === "Faturamento") return <Billing d={data} />;
   if (active === "Minha conta") return <Account d={data} prefs={prefs} />;
   return <Settings d={data} prefs={prefs} />;
@@ -3396,17 +3396,20 @@ function Users({ d }: { d: Data }) {
   return (
     <div className="page-stack">
       <div className="section-summary">
-        <strong>Convide pessoas para {d.tenant.name}</strong>
+        <strong>Acessos à plataforma · {d.tenant.name}</strong>
         <span>
-          Acesso é apenas por convite. A pessoa recebe um link, define a senha e
-          já entra — não há cadastro aberto.
+          Quem pode fazer login e com qual papel. O cadastro de colaboradores é
+          em Pessoas (e o acesso também pode ser concedido lá).
         </span>
       </div>
       <article className="card">
         <div className="card-head">
           <div>
-            <h2>Convidar usuário</h2>
-            <p>Gera um magic link de 7 dias para definir a senha.</p>
+            <h2>Convidar acesso direto</h2>
+            <p>
+              Magic link de 7 dias. Útil para convidar um admin sem cadastrar
+              como pessoa.
+            </p>
           </div>
         </div>
         <div className="invite-form">
