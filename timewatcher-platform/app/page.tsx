@@ -1813,14 +1813,14 @@ function PersonEditor({
   );
 }
 type BillingData = {
-  plan: string;
-  seats: number;
-  usedSeats: number;
+  pool: { essential: number; intelligence: number };
+  used: { essential: number; intelligence: number };
   status: string;
   cycleStart: string | null;
   prices: { essential: number; intelligence: number };
   monthlyTotal: number;
   pricingEditable: boolean;
+  poolEditable: boolean;
   features: { intelligence: boolean };
   plans: { id: string; name: string; price: number; features: string[] }[];
 };
@@ -1829,7 +1829,8 @@ const brl = (n: number) =>
 function Billing({ d }: { d: Data }) {
   void d;
   const [b, setB] = useState<BillingData | null>(null);
-  const [seats, setSeats] = useState("");
+  const [essential, setEssential] = useState("");
+  const [intelligence, setIntelligence] = useState("");
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const load = useCallback(async () => {
@@ -1839,7 +1840,8 @@ function Billing({ d }: { d: Data }) {
     if (r.ok) {
       const x: BillingData = await r.json();
       setB(x);
-      setSeats(String(x.seats));
+      setEssential(String(x.pool.essential));
+      setIntelligence(String(x.pool.intelligence));
     }
   }, []);
   useEffect(() => {
@@ -1859,28 +1861,93 @@ function Billing({ d }: { d: Data }) {
     load();
   }
   if (!b) return <State text="Carregando faturamento…" />;
-  const over = b.usedSeats > b.seats;
+  const bar = (used: number, pool: number) =>
+    Math.min(100, pool ? (used / pool) * 100 : 0);
   return (
     <div className="page-stack">
       <div className="section-summary">
-        <strong>
-          Plano {b.plan === "intelligence" ? "Intelligence" : "Essential"} ·{" "}
-          {brl(b.monthlyTotal)}/mês
-        </strong>
+        <strong>{brl(b.monthlyTotal)}/mês</strong>
         <span>
-          {b.seats} assento(s) licenciado(s) · {b.usedSeats} em uso ·{" "}
+          Pool: {b.pool.essential} Essential + {b.pool.intelligence} Intelligence
+          · em uso {b.used.essential}/{b.used.intelligence} ·{" "}
           {b.status === "active" ? "assinatura ativa" : "em avaliação (trial)"}.
         </span>
       </div>
+      <article className="card">
+        <div className="card-head">
+          <div>
+            <h2>Licenças contratadas (pool)</h2>
+            <p>
+              {b.poolEditable
+                ? "Só o super admin define os pools."
+                : "Definido pela Synova."}{" "}
+              Os admins atribuem as licenças por pessoa em Pessoas.
+            </p>
+          </div>
+          {saved && <span className="saved-flag">Salvo ✓</span>}
+        </div>
+        <div className="pool-grid">
+          {(["essential", "intelligence"] as const).map((k) => (
+            <div className="pool-item" key={k}>
+              <div className="pool-label">
+                <span className={`lic-tag ${k}`}>
+                  {k === "essential" ? "Essential" : "Intelligence · IA"}
+                </span>
+                <span className="pool-price">{brl(b.prices[k])}/assento</span>
+              </div>
+              <div className="seats-bar">
+                <b
+                  className={b.used[k] > b.pool[k] ? "over" : ""}
+                  style={{ width: `${bar(b.used[k], b.pool[k])}%` }}
+                />
+              </div>
+              <div className="pool-usage">
+                {b.used[k]} de {b.pool[k]} em uso
+                {b.used[k] > b.pool[k] ? " · acima do contratado" : ""}
+              </div>
+              {b.poolEditable && (
+                <input
+                  type="number"
+                  min={0}
+                  value={k === "essential" ? essential : intelligence}
+                  onChange={(e) =>
+                    k === "essential"
+                      ? setEssential(e.target.value)
+                      : setIntelligence(e.target.value)
+                  }
+                />
+              )}
+            </div>
+          ))}
+        </div>
+        {b.poolEditable && (
+          <button
+            className="primary"
+            disabled={busy}
+            onClick={() =>
+              update({
+                pool: {
+                  essential: Number(essential) || 0,
+                  intelligence: Number(intelligence) || 0,
+                },
+              })
+            }
+          >
+            {busy ? "Salvando…" : "Salvar pools"}
+          </button>
+        )}
+      </article>
       <div className="plan-grid">
         {b.plans.map((pl) => (
           <article
-            className={`card plan-card${b.plan === pl.id ? " current" : ""}`}
+            className={`card plan-card${pl.id === "intelligence" && b.features.intelligence ? " current" : ""}`}
             key={pl.id}
           >
             <div className="plan-head">
               <h2>{pl.name}</h2>
-              {b.plan === pl.id && <span className="pill online">Atual</span>}
+              <span className="pill offline">
+                {b.used[pl.id as "essential" | "intelligence"]} em uso
+              </span>
             </div>
             <p className="plan-price">
               {brl(pl.price)}
@@ -1891,86 +1958,34 @@ function Billing({ d }: { d: Data }) {
                 <li key={f}>{f}</li>
               ))}
             </ul>
-            <button
-              className={b.plan === pl.id ? "btn ghost" : "primary"}
-              disabled={busy || b.plan === pl.id}
-              onClick={() => update({ plan: pl.id })}
-            >
-              {b.plan === pl.id ? "Plano atual" : `Mudar para ${pl.name}`}
-            </button>
           </article>
         ))}
       </div>
-      <article className="card">
-        <div className="card-head">
-          <div>
-            <h2>Assentos</h2>
-            <p>Uma licença por colaborador monitorado.</p>
-          </div>
-          {saved && <span className="saved-flag">Salvo ✓</span>}
-        </div>
-        <div className="seats-row">
-          <div className="seats-usage">
-            <div className="seats-bar">
-              <b
-                className={over ? "over" : ""}
-                style={{
-                  width: `${Math.min(100, b.seats ? (b.usedSeats / b.seats) * 100 : 0)}%`,
-                }}
-              />
-            </div>
-            <span>
-              {b.usedSeats} de {b.seats} assentos em uso
-              {over ? " · acima do contratado" : ""}
-            </span>
-          </div>
-          <div className="seats-edit">
-            <input
-              type="number"
-              min={0}
-              value={seats}
-              onChange={(e) => setSeats(e.target.value)}
-            />
-            <button
-              className="btn"
-              disabled={busy}
-              onClick={() => update({ seats: Number(seats) || 0 })}
-            >
-              Atualizar
-            </button>
-          </div>
-        </div>
-      </article>
-      <article className={`card gate-card${b.features.intelligence ? " unlocked" : ""}`}>
+      <article
+        className={`card gate-card${b.features.intelligence ? " unlocked" : ""}`}
+      >
         <div className="card-head">
           <div>
             <h2>TeamWatcher Intelligence (IA)</h2>
             <p>
               {b.features.intelligence
-                ? "Incluído no seu plano."
-                : "Disponível no plano Intelligence."}
+                ? `Ativo — ${b.pool.intelligence} licença(s) Intelligence no pool.`
+                : "Sem licenças Intelligence no pool."}
             </p>
           </div>
-          <span className={`pill ${b.features.intelligence ? "online" : "offline"}`}>
+          <span
+            className={`pill ${b.features.intelligence ? "online" : "offline"}`}
+          >
             {b.features.intelligence ? "Ativo" : "Bloqueado"}
           </span>
         </div>
         <p className="settings-copy">
-          Perguntas em linguagem natural, resumos automáticos e recomendações por
-          evidências.{" "}
-          {b.features.intelligence
-            ? "Os recursos de IA chegam na Fase 2."
-            : "Faça upgrade para habilitar."}
+          A IA analisa apenas pessoas com licença Intelligence atribuída; quem usa
+          o chat/IA são admins e gestores.
+          {b.poolEditable && !b.features.intelligence
+            ? " Adicione licenças Intelligence ao pool para habilitar."
+            : ""}
         </p>
-        {!b.features.intelligence && (
-          <button
-            className="primary"
-            disabled={busy}
-            onClick={() => update({ plan: "intelligence" })}
-          >
-            Fazer upgrade — {brl(b.prices.intelligence)}/assento
-          </button>
-        )}
       </article>
       {b.pricingEditable && (
         <PriceEditor
@@ -1980,8 +1995,8 @@ function Billing({ d }: { d: Data }) {
         />
       )}
       <p className="billing-note">
-        Cobrança administrada pela Synova. A integração com gateway de pagamento é
-        ativada na contratação — este painel controla plano e licenças.
+        Cobrança administrada pela Synova. O super admin define os pools de
+        licença; os admins atribuem por pessoa.
       </p>
     </div>
   );

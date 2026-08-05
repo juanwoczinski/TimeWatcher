@@ -147,21 +147,27 @@ DEFAULT_PRICES = {"essential": 38.90, "intelligence": 50.90}
 
 
 def billing_summary(config: dict, tenant_id: str) -> dict:
-    """Per-seat billing state for a tenant (payment gateway intentionally stubbed)."""
+    """License-pool billing for a tenant. Super admin sets the pool (N Essential +
+    M Intelligence); admins assign a license per person. Payment gateway stubbed."""
     billing = (config.get("billing") or {}).get(tenant_id) or {}
     pricing = config.get("pricing") or {}
     prices = {k: float(pricing.get(k, DEFAULT_PRICES[k])) for k in DEFAULT_PRICES}
-    plan = billing.get("plan", "essential")
-    seats = int(billing.get("seats", 0) or 0)
-    used = sum(1 for p in config.get("people", []) if p.get("tenantId") == tenant_id and p.get("host"))
-    price = prices.get(plan, prices["essential"])
+    pool = billing.get("pool")
+    if not pool:  # migrate legacy {plan, seats}
+        seats = int(billing.get("seats", 0) or 0); legacy_plan = billing.get("plan", "essential")
+        pool = {"essential": seats if legacy_plan != "intelligence" else 0, "intelligence": seats if legacy_plan == "intelligence" else 0}
+    pool = {"essential": int(pool.get("essential", 0) or 0), "intelligence": int(pool.get("intelligence", 0) or 0)}
+    people = [p for p in config.get("people", []) if p.get("tenantId") == tenant_id]
+    used = {"essential": sum(1 for p in people if p.get("licenseType") == "essential"),
+            "intelligence": sum(1 for p in people if p.get("licenseType") == "intelligence")}
+    monthly = round(pool["essential"] * prices["essential"] + pool["intelligence"] * prices["intelligence"], 2)
     return {
-        "plan": plan, "seats": seats, "usedSeats": used, "status": billing.get("status", "trial"),
-        "cycleStart": billing.get("cycleStart"), "prices": prices, "monthlyTotal": round(seats * price, 2),
-        "features": {"intelligence": plan == "intelligence"},
+        "pool": pool, "used": used, "prices": prices, "status": billing.get("status", "trial"),
+        "cycleStart": billing.get("cycleStart"), "monthlyTotal": monthly,
+        "features": {"intelligence": pool["intelligence"] > 0},
         "plans": [
-            {"id": "essential", "name": "Essential", "price": prices["essential"], "features": ["Monitoramento e capturas", "Pessoas, times e gestor", "Relatórios e exportações", "Alertas em tempo real"]},
-            {"id": "intelligence", "name": "Intelligence", "price": prices["intelligence"], "features": ["Tudo do Essential", "IA: perguntas em linguagem natural", "Resumos e recomendações", "Detecção de padrões"]},
+            {"id": "essential", "name": "Essential", "price": prices["essential"], "features": ["Monitoramento e capturas", "Pessoas, OUs e gestor", "Relatórios e exportações", "Alertas em tempo real"]},
+            {"id": "intelligence", "name": "Intelligence", "price": prices["intelligence"], "features": ["Tudo do Essential", "Entra na análise de IA", "Perguntas em linguagem natural", "Resumos e recomendações"]},
         ],
     }
 
@@ -893,20 +899,31 @@ def _intent_of(question: str) -> str:
 
 
 def intelligence_snapshot(current_viewer: dict) -> dict:
-    """Compact, aggregate-only operational snapshot fed to the LLM (never raw content)."""
-    dash = dashboard_data({"period": ["7d"]}, current_viewer)
-    people = sorted(people_directory({"period": ["7d"]}, current_viewer)["people"], key=lambda p: p["idleSeconds"], reverse=True)
-    alerts = compute_alerts(current_viewer)
+    """Compact, aggregate-only snapshot fed to the LLM (never raw content).
+    Only people with an Intelligence license enter the analysis."""
+    everyone = people_directory({"period": ["7d"]}, current_viewer)["people"]
+    ipeople = [p for p in everyone if p.get("licenseType") == "intelligence"]
+    tracked = sum(p["trackedSeconds"] for p in ipeople); active = sum(p["activeSeconds"] for p in ipeople)
+    productive = sum(p["productiveSeconds"] for p in ipeople); idle = sum(p["idleSeconds"] for p in ipeople)
+    app_seconds: dict = defaultdict(float); site_seconds: dict = defaultdict(float)
+    for person in ipeople:
+        for app in person.get("topApps", []): app_seconds[app["name"]] += app["seconds"]
+        for site in (person.get("topUrls") or []): site_seconds[site["domain"]] += site["seconds"]
+    top_apps = sorted(app_seconds.items(), key=lambda item: item[1], reverse=True)[:6]
+    top_sites = sorted(site_seconds.items(), key=lambda item: item[1], reverse=True)[:4]
+    idle_top = sorted([p for p in ipeople if p["idleSeconds"] > 0], key=lambda p: p["idleSeconds"], reverse=True)[:5]
+    ids = {p["id"] for p in ipeople}
+    alerts = [a for a in compute_alerts(current_viewer)["alerts"] if a["personId"] in ids]
     series = platform_trends(current_viewer, 14)["series"]
-    this_week = sum(p["trackedSeconds"] for p in series[-7:]); prev_week = sum(p["trackedSeconds"] for p in series[-14:-7])
+    this_week = sum(x["trackedSeconds"] for x in series[-7:]); prev_week = sum(x["trackedSeconds"] for x in series[-14:-7])
     return {
-        "periodo": "ultimos 7 dias",
-        "resumo": {"monitorado": duration_label(dash["summary"]["trackedSeconds"]), "ativo": duration_label(dash["summary"]["activeSeconds"]),
-                   "foco_pct": dash["summary"]["focusScore"], "dispositivos": dash["summary"]["deviceCount"], "online": dash["summary"]["onlineDeviceCount"]},
-        "apps_mais_usados": [{"app": a["name"], "tempo": a["duration"], "classe": a["classification"]} for a in dash["apps"][:6]],
-        "sites_mais_usados": [{"site": d["domain"], "tempo": d["duration"]} for d in dash["domains"][:4]],
-        "maior_ociosidade": [{"pessoa": p["name"], "ocioso": duration_label(p["idleSeconds"]), "foco_pct": p["focusScore"]} for p in people[:5] if p["idleSeconds"] > 0],
-        "alertas": [{"tipo": a["type"], "pessoa": a["personName"], "mensagem": a["message"]} for a in alerts["alerts"][:8]],
+        "periodo": "ultimos 7 dias", "pessoas_analisadas": len(ipeople),
+        "resumo": {"monitorado": duration_label(tracked), "ativo": duration_label(active), "ocioso": duration_label(idle),
+                   "foco_pct": round(productive / tracked * 100 if tracked else 0)},
+        "apps_mais_usados": [{"app": app, "tempo": duration_label(seconds)} for app, seconds in top_apps],
+        "sites_mais_usados": [{"site": domain, "tempo": duration_label(seconds)} for domain, seconds in top_sites],
+        "maior_ociosidade": [{"pessoa": p["name"], "ocioso": duration_label(p["idleSeconds"]), "foco_pct": p["focusScore"]} for p in idle_top],
+        "alertas": [{"tipo": a["type"], "pessoa": a["personName"], "mensagem": a["message"]} for a in alerts[:8]],
         "variacao_semana": {"esta_semana": duration_label(this_week), "semana_anterior": duration_label(prev_week)},
     }
 
@@ -943,76 +960,41 @@ def intelligence_answer(current_viewer: dict, question: str) -> dict:
     Gated behind the Intelligence plan."""
     config = load_config()
     tenant_id = current_viewer["tenantId"]
+    if current_viewer.get("role") in ("member", "employee"):
+        raise PermissionError("plan_required")
     if not billing_summary(config, tenant_id)["features"]["intelligence"]:
         raise PermissionError("plan_required")
+    snap = intelligence_snapshot(current_viewer)
     intent = _intent_of(question)
-    answer, data = "", {}
-    if intent == "top_time":
-        dash = dashboard_data({"period": ["7d"]}, current_viewer)
-        apps = dash["apps"][:5]; domains = dash["domains"][:3]
-        if apps:
-            top = ", ".join(f"{a['name']} ({a['duration']})" for a in apps[:3])
-            answer = f"Nos últimos 7 dias, o time concentrou mais tempo em: {top}."
-            if domains:
-                answer += " Entre sites, destaque para " + ", ".join(f"{d['domain']} ({d['duration']})" for d in domains) + "."
-            answer += f" O foco médio ficou em {dash['summary']['focusScore']}%."
-        else:
-            answer = "Ainda não há atividade suficiente nos últimos 7 dias para uma leitura de concentração de tempo."
-        data = {"apps": apps, "domains": domains}
+    resumo = snap["resumo"]; n = snap["pessoas_analisadas"]
+    if n == 0:
+        answer = "Nenhuma pessoa com licença Intelligence tem dados no período — atribua a licença em Pessoas para incluí-la na análise."
+    elif intent == "top_time":
+        apps = snap["apps_mais_usados"]; sites = snap["sites_mais_usados"]
+        answer = (f"Entre {n} pessoa(s) na análise, mais tempo em: " + ", ".join(f"{a['app']} ({a['tempo']})" for a in apps[:3]) + ".") if apps else "Sem apps registrados no período."
+        if sites: answer += " Sites: " + ", ".join(f"{s['site']} ({s['tempo']})" for s in sites) + "."
+        answer += f" Foco médio {resumo['foco_pct']}%."
     elif intent == "idle":
-        people = sorted(people_directory({"period": ["7d"]}, current_viewer)["people"], key=lambda p: p["idleSeconds"], reverse=True)
-        flagged = [p for p in people if p["idleSeconds"] > 0][:5]
-        if flagged:
-            answer = "Maiores volumes de ociosidade nos últimos 7 dias: " + "; ".join(f"{p['name']} ({duration_label(p['idleSeconds'])}, {p['focusScore']}% foco)" for p in flagged) + "."
-        else:
-            answer = "Nenhuma ociosidade relevante registrada nos últimos 7 dias."
-        data = {"people": [{"name": p["name"], "idleSeconds": p["idleSeconds"], "focusScore": p["focusScore"]} for p in flagged]}
+        top = snap["maior_ociosidade"]
+        answer = ("Maiores ociosidades: " + "; ".join(f"{p['pessoa']} ({p['ocioso']}, {p['foco_pct']}% foco)" for p in top) + ".") if top else "Sem ociosidade relevante no período."
     elif intent == "off_schedule":
-        alerts = compute_alerts(current_viewer)["alerts"]
-        relevant = [a for a in alerts if a["type"] in ("agent_offline", "low_adherence")]
-        if relevant:
-            answer = f"{len(relevant)} pessoa(s) fora do previsto agora: " + "; ".join(f"{a['personName']} — {a['message']}" for a in relevant[:5])
-        else:
-            answer = "Ninguém fora da jornada planejada neste momento — a operação está aderente."
-        data = {"alerts": relevant}
+        al = snap["alertas"]
+        answer = (f"{len(al)} fora do previsto: " + "; ".join(f"{a['pessoa']} — {a['mensagem']}" for a in al[:5])) if al else "Ninguém fora da jornada no momento."
     elif intent == "week_change":
-        series = platform_trends(current_viewer, 14)["series"]
-        this_week = sum(p["trackedSeconds"] for p in series[-7:]); prev_week = sum(p["trackedSeconds"] for p in series[-14:-7])
-        this_prod = sum(p["productiveSeconds"] for p in series[-7:]); prev_prod = sum(p["productiveSeconds"] for p in series[-14:-7])
-        if prev_week > 0:
-            delta = (this_week - prev_week) / prev_week * 100
-            direction = "subiu" if delta >= 0 else "caiu"
-            answer = f"O tempo monitorado {direction} {abs(delta):.0f}% em relação à semana anterior."
-        else:
-            answer = "Ainda não há histórico suficiente da semana anterior para comparação."
-        fp = round(this_prod / this_week * 100) if this_week else 0
-        answer += f" Nos últimos 7 dias, o foco médio foi {fp}% ({duration_label(this_prod)} produtivos de {duration_label(this_week)})."
-        data = {"thisWeekSeconds": round(this_week), "prevWeekSeconds": round(prev_week)}
+        vs = snap["variacao_semana"]
+        answer = f"Tempo monitorado (organização): {vs['esta_semana']} nesta semana vs {vs['semana_anterior']} na anterior. Foco médio das pessoas na IA: {resumo['foco_pct']}%."
     elif intent == "recommendations":
-        people = sorted(people_directory({"period": ["7d"]}, current_viewer)["people"], key=lambda p: p["idleSeconds"], reverse=True)
-        active_alerts = compute_alerts(current_viewer)["alerts"]
         recs = []
-        if active_alerts:
-            recs.append(f"Tratar {len(active_alerts)} alerta(s) ativo(s), começando por " + ", ".join(a["personName"] for a in active_alerts[:3]) + ".")
-        idle = [p for p in people if p["idleSeconds"] > 0][:3]
-        if idle:
-            recs.append("Revisar ociosidade de " + ", ".join(f"{p['name']} ({duration_label(p['idleSeconds'])})" for p in idle) + " — confirmar se são pausas legítimas.")
-        low = [p for p in people if p["focusScore"] < 50 and p["trackedSeconds"] > 0][:3]
-        if low:
-            recs.append("Apoiar quem está com foco baixo: " + ", ".join(f"{p['name']} ({p['focusScore']}%)" for p in low) + ".")
+        if snap["alertas"]: recs.append("Tratar alertas de " + ", ".join(a["pessoa"] for a in snap["alertas"][:3]) + ".")
+        if snap["maior_ociosidade"]: recs.append("Revisar ociosidade de " + ", ".join(p["pessoa"] for p in snap["maior_ociosidade"][:3]) + " — confirmar se são pausas legítimas.")
         answer = ("Recomendações prioritárias: " + " ".join(f"{i+1}) {r}" for i, r in enumerate(recs))) if recs else "Operação saudável — sem ações prioritárias no momento."
-        data = {"recommendations": recs}
     else:
-        dash = dashboard_data({"period": ["today"]}, current_viewer)
-        s = dash["summary"]; alerts = compute_alerts(current_viewer)["counts"]
-        answer = (f"Hoje: {duration_label(s['trackedSeconds'])} monitorados, {duration_label(s['activeSeconds'])} ativos e {s['focusScore']}% de foco "
-                  f"em {s['deviceCount']} dispositivo(s) ({s['onlineDeviceCount']} online). "
-                  f"{alerts['total']} alerta(s) ativo(s) ({alerts['critical']} crítico(s)).")
-        data = {"summary": s, "alerts": alerts}
-    result = {"question": question, "intent": intent, "answer": answer, "data": data, "suggestions": INTELLIGENCE_SUGGESTIONS, "generatedAt": datetime.now(timezone.utc).isoformat(), "source": "rules"}
+        answer = (f"Últimos 7 dias ({n} pessoa(s) na IA): {resumo['monitorado']} monitorados, {resumo['ativo']} ativos, "
+                  f"{resumo['foco_pct']}% de foco. {len(snap['alertas'])} alerta(s).")
+    result = {"question": question, "intent": intent, "answer": answer, "data": snap, "suggestions": INTELLIGENCE_SUGGESTIONS, "generatedAt": datetime.now(timezone.utc).isoformat(), "source": "rules"}
     if os.environ.get("TIMEWATCHER_LLM") == "bedrock":
         try:
-            generated = llm_answer(question, intelligence_snapshot(current_viewer))
+            generated = llm_answer(question, snap)
             if generated:
                 result["answer"] = generated; result["source"] = "llm"
         except Exception:
@@ -1136,7 +1118,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/dashboard/billing":
             config = load_config(); is_super = current["role"] == "super_admin"
             tenant_id = params.get("tenant", [current["tenantId"]])[0] if is_super else current["tenantId"]
-            return self.send_json(200, {**billing_summary(config, tenant_id), "pricingEditable": is_super, "tenant": next((t for t in config["tenants"] if t["id"] == tenant_id), {"id": tenant_id, "name": tenant_id})})
+            return self.send_json(200, {**billing_summary(config, tenant_id), "pricingEditable": is_super, "poolEditable": is_super, "tenant": next((t for t in config["tenants"] if t["id"] == tenant_id), {"id": tenant_id, "name": tenant_id})})
         if parsed.path in ("/dashboard/export.csv", "/dashboard/export.json"):
             try: data = dashboard_data(params, current)
             except Exception as error: return self.send_json(502, {"error": "export_unavailable", "detail": str(error)[:240]})
@@ -1212,7 +1194,12 @@ class Handler(BaseHTTPRequestHandler):
                     for field in ("teamId", "ouId", "scheduleId"):
                         if field in payload: entry[field] = payload[field] or None
                     if "licenseType" in payload:
-                        entry["licenseType"] = payload["licenseType"] if payload.get("licenseType") in ("essential", "intelligence") else None
+                        new_lic = payload["licenseType"] if payload.get("licenseType") in ("essential", "intelligence") else None
+                        if new_lic and new_lic != entry.get("licenseType"):
+                            bs = billing_summary(config, p_tenant)
+                            if bs["used"].get(new_lic, 0) >= bs["pool"].get(new_lic, 0):
+                                return self.send_json(409, {"error": "pool_exhausted", "license": new_lic})
+                        entry["licenseType"] = new_lic
                     save_config(config); audit("person.update", current["email"], {"id": entry["id"]}); return self.send_json(200, entry)
                 if parsed.path == "/dashboard/people/delete":
                     ref_id = str(payload.get("id") or "").strip()
@@ -1299,24 +1286,29 @@ class Handler(BaseHTTPRequestHandler):
                     save_config(config); audit("policies.update", current["email"], {"tenant": p_tenant})
                     return self.send_json(200, {"retentionDays": retention_days(), "classification": classification_rules(config, p_tenant)})
                 if parsed.path == "/dashboard/billing":
-                    b_tenant = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
+                    if current["role"] != "super_admin":
+                        return self.send_json(403, {"error": "super_admin_required"})
+                    b_tenant = payload.get("tenantId", current["tenantId"])
                     billing = config.setdefault("billing", {}).setdefault(b_tenant, {})
-                    if str(payload.get("plan")) in ("essential", "intelligence"):
-                        billing["plan"] = str(payload["plan"])
-                    if "seats" in payload:
-                        try: billing["seats"] = max(0, min(100000, int(payload["seats"])))
-                        except (TypeError, ValueError): pass
-                    if current["role"] == "super_admin" and "status" in payload:
+                    if isinstance(payload.get("pool"), dict):
+                        pool = dict(billing.get("pool") or {})
+                        for key in ("essential", "intelligence"):
+                            if key in payload["pool"]:
+                                try: pool[key] = max(0, min(1000000, int(payload["pool"][key])))
+                                except (TypeError, ValueError): pass
+                        billing["pool"] = {"essential": int(pool.get("essential", 0) or 0), "intelligence": int(pool.get("intelligence", 0) or 0)}
+                        billing.pop("plan", None); billing.pop("seats", None)
+                    if "status" in payload:
                         billing["status"] = "active" if str(payload["status"]).lower() in ("active", "ativo") else "trial"
                     if not billing.get("cycleStart"):
                         billing["cycleStart"] = datetime.now(timezone.utc).date().isoformat()
-                    if current["role"] == "super_admin" and isinstance(payload.get("prices"), dict):
+                    if isinstance(payload.get("prices"), dict):
                         pricing = config.setdefault("pricing", {})
                         for key in ("essential", "intelligence"):
                             if key in payload["prices"]:
                                 try: pricing[key] = round(float(payload["prices"][key]), 2)
                                 except (TypeError, ValueError): pass
-                    save_config(config); audit("billing.update", current["email"], {"tenant": b_tenant, "plan": billing.get("plan"), "seats": billing.get("seats")})
+                    save_config(config); audit("billing.update", current["email"], {"tenant": b_tenant, "pool": billing.get("pool")})
                     return self.send_json(200, billing_summary(config, b_tenant))
                 if parsed.path in ("/dashboard/devices/block", "/dashboard/devices/unblock"):
                     host = str(payload.get("host", "")).strip()
