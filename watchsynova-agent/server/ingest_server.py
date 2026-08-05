@@ -143,7 +143,7 @@ def classification_rules(config: dict, tenant_id: str) -> dict:
     return {cat: [str(t).strip().lower() for t in (raw.get(cat) or []) if str(t).strip()] for cat in ("productive", "unproductive", "neutral")}
 
 
-DEFAULT_PRICES = {"essential": 29.90, "intelligence": 50.90}
+DEFAULT_PRICES = {"essential": 38.90, "intelligence": 50.90}
 
 
 def billing_summary(config: dict, tenant_id: str) -> dict:
@@ -376,6 +376,64 @@ def bounds(params: dict) -> tuple[datetime, datetime, str]:
     return (local - timedelta(days=days)).astimezone(timezone.utc), now, period
 
 
+def effective_segments(events: list, start: datetime, end: datetime) -> list[tuple[datetime, datetime, dict]]:
+    """Turn heartbeat-like events into non-overlapping observed intervals.
+
+    A newer observation closes the previous one. This prevents retries and the
+    former 60-second web sampler from inflating tracked time.
+    """
+    parsed = []
+    for event in events:
+        try:
+            event_start = max(start, parse_timestamp(str(event["timestamp"])))
+            event_end = min(end, parse_timestamp(str(event["timestamp"])) + timedelta(seconds=max(0.0, float(event.get("duration", 0)))))
+            if event_end > event_start:
+                parsed.append((event_start, event_end, event.get("data", {})))
+        except (KeyError, TypeError, ValueError):
+            continue
+    parsed.sort(key=lambda item: item[0])
+    segments = []
+    for index, (event_start, event_end, data) in enumerate(parsed):
+        if index + 1 < len(parsed):
+            event_end = min(event_end, parsed[index + 1][0])
+        if event_end > event_start:
+            segments.append((event_start, event_end, data))
+    return segments
+
+
+def merge_intervals(segments: list[tuple[datetime, datetime, dict]]) -> list[tuple[datetime, datetime]]:
+    merged: list[list[datetime]] = []
+    for segment_start, segment_end, _ in sorted(segments, key=lambda item: item[0]):
+        if not merged or segment_start > merged[-1][1]:
+            merged.append([segment_start, segment_end])
+        else:
+            merged[-1][1] = max(merged[-1][1], segment_end)
+    return [(item[0], item[1]) for item in merged]
+
+
+def intervals_duration(intervals: list[tuple[datetime, datetime]]) -> float:
+    return sum((interval_end - interval_start).total_seconds() for interval_start, interval_end in intervals)
+
+
+def uncovered_duration(segment: tuple[datetime, datetime, dict], masks: list[tuple[datetime, datetime]]) -> float:
+    segment_start, segment_end, _ = segment
+    covered = 0.0
+    for mask_start, mask_end in masks:
+        if mask_end <= segment_start: continue
+        if mask_start >= segment_end: break
+        covered += max(0.0, (min(segment_end, mask_end) - max(segment_start, mask_start)).total_seconds())
+    return max(0.0, (segment_end - segment_start).total_seconds() - covered)
+
+
+def intersection_duration(left: list[tuple[datetime, datetime]], right: list[tuple[datetime, datetime]]) -> float:
+    total = 0.0; i = 0; j = 0
+    while i < len(left) and j < len(right):
+        total += max(0.0, (min(left[i][1], right[j][1]) - max(left[i][0], right[j][0])).total_seconds())
+        if left[i][1] <= right[j][1]: i += 1
+        else: j += 1
+    return total
+
+
 def dashboard_data(params: dict, current_viewer: dict) -> dict:
     start, end, period = bounds(params)
     config = load_config()
@@ -392,33 +450,36 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     afk_buckets = [(key, value) for key, value in buckets.items() if value.get("type") == "afkstatus"]
     input_buckets = [(key, value) for key, value in buckets.items() if value.get("type") == "os.hid.input"]
     web_buckets = [(key, value) for key, value in buckets.items() if value.get("type") in ("web.tab.current", "currentwebtab") or "web" in str(value.get("type", "")).lower()]
+    heartbeat_buckets = [(key, value) for key, value in buckets.items() if value.get("type") == "timewatcher.heartbeat"]
 
     def events_for(bucket_id: str) -> list:
         query = urllib.parse.urlencode({"start": start.isoformat(), "end": end.isoformat(), "limit": 10000})
         return aw_get(f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}/events?{query}")
 
-    windows = [event for bucket_id, _ in window_buckets for event in events_for(bucket_id)]
-    afk_events = [event for bucket_id, _ in afk_buckets for event in events_for(bucket_id)]
+    window_event_groups = [events_for(bucket_id) for bucket_id, _ in window_buckets]
+    afk_event_groups = [events_for(bucket_id) for bucket_id, _ in afk_buckets]
+    web_event_groups = [events_for(bucket_id) for bucket_id, _ in web_buckets]
+    windows = [event for group in window_event_groups for event in group]
+    afk_events = [event for group in afk_event_groups for event in group]
     input_events = [event for bucket_id, _ in input_buckets for event in events_for(bucket_id)]
-    web_events = [event for bucket_id, _ in web_buckets for event in events_for(bucket_id)]
+    web_events = [event for group in web_event_groups for event in group]
     app_seconds, domain_seconds, page_seconds, hourly = defaultdict(float), defaultdict(float), defaultdict(float), defaultdict(float)
     page_titles, recent = {}, []
-    tracked_seconds = 0.0
-    for event in windows:
-        seconds = max(0.0, float(event.get("duration", 0)))
-        data = event.get("data", {})
+    window_segments = [segment for group in window_event_groups for segment in effective_segments(group, start, end)]
+    web_segments = [segment for group in web_event_groups for segment in effective_segments(group, start, end)]
+    idle_segments = [segment for group in afk_event_groups for segment in effective_segments([event for event in group if event.get("data", {}).get("status") == "afk"], start, end)]
+    web_intervals = merge_intervals(web_segments)
+    tracked_intervals = merge_intervals(window_segments + web_segments)
+    tracked_seconds = intervals_duration(tracked_intervals)
+    for segment_start, segment_end, data in window_segments:
+        seconds = (segment_end - segment_start).total_seconds()
         app = str(data.get("app", "Não identificado")) or "Não identificado"
         title = str(data.get("title", ""))
-        tracked_seconds += seconds
         app_seconds[app] += seconds
-        try:
-            hourly[parse_timestamp(str(event["timestamp"])).astimezone(LOCAL_TIMEZONE).hour] += seconds
-        except (KeyError, ValueError):
-            pass
-        recent.append({"timestamp": event.get("timestamp"), "duration": seconds, "app": app, "title": title})
-    for event in web_events:
-        seconds = max(0.0, float(event.get("duration", 0)))
-        data = event.get("data", {})
+        hourly[segment_start.astimezone(LOCAL_TIMEZONE).hour] += seconds
+        recent.append({"timestamp": segment_start.isoformat(), "duration": seconds, "app": app, "title": title})
+    for segment_start, segment_end, data in web_segments:
+        seconds = (segment_end - segment_start).total_seconds()
         url = str(data.get("url", ""))
         if not url:
             continue
@@ -428,23 +489,37 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
         domain_seconds[domain] += seconds
         page_seconds[clean_url] += seconds
         page_titles[clean_url] = str(data.get("title", ""))
+        if not window_segments:
+            hourly[segment_start.astimezone(LOCAL_TIMEZONE).hour] += seconds
 
-    idle_seconds = sum(max(0.0, float(e.get("duration", 0))) for e in afk_events if e.get("data", {}).get("status") == "afk")
-    active_seconds = max(0.0, tracked_seconds - min(idle_seconds, tracked_seconds))
+    idle_seconds = intersection_duration(tracked_intervals, merge_intervals(idle_segments))
+    active_seconds = max(0.0, tracked_seconds - idle_seconds)
     category_seconds = {"productive": 0.0, "neutral": 0.0, "unproductive": 0.0}
+    for segment_start, segment_end, data in web_segments:
+        raw_url = str(data.get("url", "")); domain = urllib.parse.urlsplit(raw_url).hostname or raw_url
+        category_seconds[classify(domain, rules)] += (segment_end - segment_start).total_seconds()
+    for segment in window_segments:
+        app = str(segment[2].get("app", "Não identificado")) or "Não identificado"
+        category_seconds[classify(app, rules)] += uncovered_duration(segment, web_intervals)
     apps = []
+    window_total = intervals_duration(merge_intervals(window_segments))
     for name, seconds in sorted(app_seconds.items(), key=lambda item: item[1], reverse=True):
         category = classify(name, rules)
-        category_seconds[category] += seconds
-        apps.append({"name": name, "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": category, "share": round(seconds / tracked_seconds * 100 if tracked_seconds else 0, 1)})
+        apps.append({"name": name, "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": category, "share": round(seconds / window_total * 100 if window_total else 0, 1)})
     urls = []
-    web_total = sum(page_seconds.values())
+    web_total = intervals_duration(web_intervals)
     for url, seconds in sorted(page_seconds.items(), key=lambda item: item[1], reverse=True):
         domain = urllib.parse.urlsplit(url).hostname or url
         urls.append({"url": url, "domain": domain, "title": page_titles.get(url, ""), "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": classify(domain, rules), "share": round(seconds / web_total * 100 if web_total else 0, 1)})
+    if urls and web_total:
+        # Keep the displayed percentages arithmetically integral after
+        # one-decimal rounding (for example, never show a total of 100.2%).
+        urls[0]["share"] = round(urls[0]["share"] + (100.0 - sum(item["share"] for item in urls)), 1)
 
-    all_buckets = window_buckets + afk_buckets + input_buckets + web_buckets
+    screenshot_buckets = [(key, value) for key, value in buckets.items() if value.get("type") in ("timewatcher.screenshot", "watchsynova.screenshot")]
+    all_buckets = window_buckets + afk_buckets + input_buckets + web_buckets + screenshot_buckets + heartbeat_buckets
     last_seen_values, devices_by_host, clients_by_host = [], {}, {}
+    signals_by_host: dict = defaultdict(dict)
     for _, bucket in all_buckets:
         hostname = bucket.get("hostname") or "Dispositivo desconhecido"
         if bucket.get("client"): clients_by_host.setdefault(hostname, str(bucket.get("client"))[:80])
@@ -453,13 +528,17 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
             last_dt = parse_timestamp(last_value)
             last_seen_values.append(last_dt)
             devices_by_host[hostname] = max(last_dt, devices_by_host.get(hostname, last_dt))
+            btype = str(bucket.get("type", ""))
+            signal = "window" if btype == "currentwindow" else "afk" if btype == "afkstatus" else "input" if btype == "os.hid.input" else "web" if btype in ("web.tab.current", "currentwebtab") or "web" in btype.lower() else "screenshots" if btype in ("timewatcher.screenshot", "watchsynova.screenshot") else "heartbeat" if btype == "timewatcher.heartbeat" else None
+            if signal:
+                signals_by_host[hostname][signal] = max(last_dt, signals_by_host[hostname].get(signal, last_dt))
     presses = sum(int(e.get("data", {}).get("presses", 0)) for e in input_events)
     clicks = sum(int(e.get("data", {}).get("clicks", 0)) for e in input_events)
     blocked_hosts = set((config.get("blockedHosts") or {}).get(tenant_id, []))
     def device_health(seen: datetime) -> str:
         age = (end - seen).total_seconds()
         return "online" if age < 300 else "stale" if age < 3600 else "offline"
-    devices = [{"id": host, "name": host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop", "lastSeen": seen.isoformat(), "status": "online" if (end - seen).total_seconds() < 300 else "offline", "health": device_health(seen), "client": clients_by_host.get(host), "blocked": host in blocked_hosts, "trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "presses": presses, "clicks": clicks} for host, seen in sorted(devices_by_host.items())]
+    devices = [{"id": host, "name": host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop", "lastSeen": seen.isoformat(), "status": "online" if (end - seen).total_seconds() < 300 else "offline", "health": device_health(seen), "client": clients_by_host.get(host), "blocked": host in blocked_hosts, "trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "presses": presses, "clicks": clicks, "signals": {name: timestamp.isoformat() for name, timestamp in signals_by_host.get(host, {}).items()}} for host, seen in sorted(devices_by_host.items())]
     _managed = managed_team_ids(config, current_viewer.get("email", ""), tenant_id) if current_viewer["role"] == "manager" else None
     people = [person.copy() for person in config["people"] if person["tenantId"] == tenant_id and (_managed is None or person.get("teamId") in _managed)]
     if people:
@@ -516,11 +595,12 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
     hosts: dict = {}
     for bucket_id, bucket in buckets.items():
         host = bucket.get("hostname") or "Dispositivo desconhecido"
-        slot = hosts.setdefault(host, {"window": [], "afk": [], "input": [], "lastSeen": None})
+        slot = hosts.setdefault(host, {"window": [], "afk": [], "input": [], "web": [], "lastSeen": None})
         btype = bucket.get("type")
         if btype == "currentwindow": slot["window"].append(bucket_id)
         elif btype == "afkstatus": slot["afk"].append(bucket_id)
         elif btype == "os.hid.input": slot["input"].append(bucket_id)
+        elif btype in ("web.tab.current", "currentwebtab") or "web" in str(btype or "").lower(): slot["web"].append(bucket_id)
         last_value = bucket.get("last_updated") or bucket.get("created")
         if last_value:
             last_dt = parse_timestamp(last_value)
@@ -537,12 +617,20 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
 
     people = []
     for host, slot in sorted(hosts.items()):
-        app_seconds: dict = defaultdict(float); tracked = 0.0
+        app_seconds: dict = defaultdict(float); page_seconds: dict = defaultdict(float); page_titles: dict = {}; tracked = 0.0; recent_activity = []
         for bucket_id in slot["window"]:
             for event in events_for(bucket_id):
                 seconds = max(0.0, float(event.get("duration", 0)))
                 app = str(event.get("data", {}).get("app", "Não identificado")) or "Não identificado"
                 app_seconds[app] += seconds; tracked += seconds
+                recent_activity.append({"timestamp": event.get("timestamp"), "kind": "app", "app": app, "title": str(event.get("data", {}).get("title", "")), "duration": duration_label(seconds)})
+        for bucket_id in slot["web"]:
+            for event in events_for(bucket_id):
+                seconds = max(0.0, float(event.get("duration", 0))); data = event.get("data", {}); raw_url = str(data.get("url", ""))
+                if not raw_url: continue
+                parsed = urllib.parse.urlsplit(raw_url if "://" in raw_url else "https://" + raw_url)
+                clean_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")); page_seconds[clean_url] += seconds; page_titles[clean_url] = str(data.get("title", ""))
+                recent_activity.append({"timestamp": event.get("timestamp"), "kind": "url", "app": str(data.get("app", "Navegador")), "title": page_titles[clean_url], "url": clean_url, "duration": duration_label(seconds)})
         productive = sum(seconds for app, seconds in app_seconds.items() if classify(app, rules) == "productive")
         idle = 0.0
         for bucket_id in slot["afk"]:
@@ -564,6 +652,8 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
         last_seen = slot["lastSeen"]
         online = bool(last_seen and (end - last_seen).total_seconds() < 300)
         top_apps = sorted(app_seconds.items(), key=lambda item: item[1], reverse=True)[:6]
+        top_urls = sorted(page_seconds.items(), key=lambda item: item[1], reverse=True)[:8]
+        recent_activity.sort(key=lambda item: item.get("timestamp") or "", reverse=True)
         people.append({
             "id": pid, "host": host,
             "name": meta.get("name") or host.replace(".local", ""),
@@ -575,6 +665,8 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
             "productiveSeconds": round(productive, 3), "focusScore": round(productive / tracked * 100 if tracked else 0),
             "presses": presses, "clicks": clicks,
             "topApps": [{"name": app, "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": classify(app, rules)} for app, seconds in top_apps],
+            "topUrls": [{"url": url, "domain": urllib.parse.urlsplit(url).hostname or url, "title": page_titles.get(url, ""), "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": classify(urllib.parse.urlsplit(url).hostname or url, rules)} for url, seconds in top_urls],
+            "recentActivity": recent_activity[:40],
         })
     people.sort(key=lambda person: (person["status"] != "online", person["name"].lower()))
     tenant = next((t for t in config["tenants"] if t["id"] == tenant_id), {"id": tenant_id, "name": tenant_id})
@@ -978,7 +1070,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.list_audit()
         if parsed.path == "/dashboard/data":
             key = ("data", current["role"], current["email"], current["tenantId"], str(params.get("tenant")), str(params.get("period")), str(params.get("start")), str(params.get("end")))
-            try: return self.send_json(200, cached(key, lambda: dashboard_data(params, current)))
+            force_refresh = params.get("refresh", ["0"])[0] == "1"
+            try: return self.send_json(200, dashboard_data(params, current) if force_refresh else cached(key, lambda: dashboard_data(params, current)))
             except Exception as error: return self.send_json(502, {"error": "dashboard_unavailable", "detail": str(error)[:240]})
         if parsed.path == "/dashboard/people":
             key = ("people", current["role"], current["email"], current["tenantId"], str(params.get("tenant")), str(params.get("period")), str(params.get("start")), str(params.get("end")))
@@ -1214,7 +1307,15 @@ class Handler(BaseHTTPRequestHandler):
     def serve_screenshot(self, current: dict, image_id: str) -> None:
         if not re.fullmatch(r"[0-9a-f-]{36}", image_id): return self.send_json(400, {"error": "invalid_id"})
         root = DATA_DIR / "screenshots"
-        matches = list(root.rglob(f"{image_id}.jpg")) if current["role"] == "super_admin" else list((root / current["tenantId"]).rglob(f"{image_id}.jpg"))
+        if current["role"] == "super_admin":
+            matches = list(root.rglob(f"{image_id}.jpg"))
+        else:
+            matches = list((root / current["tenantId"]).rglob(f"{image_id}.jpg"))
+            # Screenshots created before tenant-aware storage lived directly
+            # under screenshots/YYYY-MM-DD. They belong to the original Synova
+            # tenant and must remain readable by its administrators.
+            if current["tenantId"] == "synova":
+                matches += list(root.glob(f"*/{image_id}.jpg"))
         if not matches: return self.send_json(404, {"error": "not_found"})
         audit("screenshot.view", current["email"], {"id": image_id})
         image = matches[0].read_bytes(); self.send_response(200); self.send_header("Content-Type", "image/jpeg"); self.send_header("Cache-Control", "private, max-age=300"); self.send_header("Content-Length", str(len(image))); self.end_headers(); self.wfile.write(image)
@@ -1382,6 +1483,7 @@ class Handler(BaseHTTPRequestHandler):
             clean = [{"timestamp": str(e["timestamp"]), "duration": float(e.get("duration", 0)), "data": dict(e.get("data", {}))} for e in events]
             aw_request("POST", f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}", {"id": bucket_id, "type": str(bucket.get("type", "unknown"))[:200], "client": str(bucket.get("client", "timewatcher"))[:200], "hostname": str(bucket.get("hostname", "unknown"))[:200], "data": dict(bucket.get("data", {}))})
             if clean: aw_request("POST", f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}/events", clean)
+            with _CACHE_LOCK: _AW_CACHE.clear()
         except (KeyError, TypeError, ValueError, json.JSONDecodeError): return self.send_json(400, {"error": "invalid_payload"})
         except Exception: return self.send_json(502, {"error": "activity_write_failed"})
         self.send_json(201, {"bucket": bucket_id, "accepted": len(clean)})
