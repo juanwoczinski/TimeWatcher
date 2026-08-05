@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type ReactNode,
 } from "react";
 import { AuthScreen } from "./auth-screen";
 
@@ -901,6 +902,7 @@ function Dashboard() {
           )
         )}
       </section>
+      {data && <ChatWidget d={data} go={setActive} />}
     </main>
   );
 }
@@ -1772,24 +1774,93 @@ const INTENT_LABEL: Record<string, string> = {
   summary: "Panorama",
 };
 type Digest = { kind: string; period: string; text: string; generatedAt: string };
-function Intelligence({ d, go }: { d: Data; go: (s: Section) => void }) {
-  void d;
+type ChatMsg = { role: "user" | "ai"; text: string; intent?: string };
+function parseInline(text: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  const re = /\*\*(.+?)\*\*|`(.+?)`/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let k = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) nodes.push(text.slice(last, m.index));
+    if (m[1]) nodes.push(<strong key={k++}>{m[1]}</strong>);
+    else if (m[2]) nodes.push(<code key={k++}>{m[2]}</code>);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
+}
+function MarkdownText({ text }: { text: string }) {
+  const blocks: ReactNode[] = [];
+  text.split("\n").forEach((raw, i) => {
+    const line = raw.trim();
+    if (!line) return;
+    if (/^[-*•]\s+/.test(line) || /^\d+[).]\s+/.test(line)) {
+      const content = line.replace(/^[-*•]\s+/, "").replace(/^\d+[).]\s+/, "");
+      blocks.push(
+        <div className="md-li" key={i}>
+          <span className="md-bullet">•</span>
+          <span>{parseInline(content)}</span>
+        </div>,
+      );
+    } else if (/^#{1,6}\s+/.test(line)) {
+      blocks.push(
+        <p className="md-h" key={i}>
+          {parseInline(line.replace(/^#{1,6}\s+/, ""))}
+        </p>,
+      );
+    } else {
+      blocks.push(
+        <p className="md-p" key={i}>
+          {parseInline(line)}
+        </p>,
+      );
+    }
+  });
+  return <>{blocks}</>;
+}
+function GateCard({ go }: { go: (s: Section) => void }) {
+  return (
+    <article className="card gate-card">
+      <div className="card-head">
+        <div>
+          <h2>TeamWatcher Intelligence (IA)</h2>
+          <p>Disponível no plano Intelligence.</p>
+        </div>
+        <span className="pill offline">Bloqueado</span>
+      </div>
+      <p className="settings-copy">
+        Perguntas em linguagem natural, resumos automáticos e recomendações por
+        evidências. Faça upgrade para habilitar.
+      </p>
+      <button className="primary" onClick={() => go("Faturamento")}>
+        Ver planos
+      </button>
+    </article>
+  );
+}
+function IntelChat({
+  go,
+  variant,
+}: {
+  go: (s: Section) => void;
+  variant: "page" | "widget";
+}) {
   const [locked, setLocked] = useState(false);
-  const [ans, setAns] = useState<IntelAnswer | null>(null);
+  const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
-  const [digests, setDigests] = useState<Digest[]>([]);
-  useEffect(() => {
-    fetch("/platform-api/dashboard/digests", { credentials: "same-origin" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((x) => setDigests(x?.digests || []))
-      .catch(() => {});
-  }, []);
-  const ask = useCallback(async (question: string) => {
+  const threadRef = useRef<HTMLDivElement>(null);
+  const ask = useCallback(async (question: string, fromUser: boolean) => {
+    const text = question.trim();
     setBusy(true);
+    if (fromUser && text) {
+      setMsgs((prev) => [...prev, { role: "user", text }]);
+      setQ("");
+    }
     const r = await fetch(
-      `/platform-api/dashboard/intelligence?q=${encodeURIComponent(question)}`,
+      `/platform-api/dashboard/intelligence?q=${encodeURIComponent(text)}`,
       { credentials: "same-origin" },
     );
     setBusy(false);
@@ -1800,87 +1871,102 @@ function Intelligence({ d, go }: { d: Data; go: (s: Section) => void }) {
     if (r.ok) {
       const x: IntelAnswer = await r.json();
       setLocked(false);
-      setAns(x);
+      setMsgs((prev) => [...prev, { role: "ai", text: x.answer, intent: x.intent }]);
       if (x.suggestions) setSuggestions(x.suggestions);
     }
   }, []);
   useEffect(() => {
-    ask("");
+    ask("", false);
   }, [ask]);
-  if (locked) {
-    return (
-      <div className="page-stack">
-        <article className="card gate-card">
-          <div className="card-head">
-            <div>
-              <h2>TeamWatcher Intelligence (IA)</h2>
-              <p>Disponível no plano Intelligence.</p>
-            </div>
-            <span className="pill offline">Bloqueado</span>
-          </div>
-          <p className="settings-copy">
-            Perguntas em linguagem natural, resumos automáticos e recomendações
-            por evidências, apoiados nos dados da sua operação. Faça upgrade para
-            habilitar.
-          </p>
-          <button className="primary" onClick={() => go("Faturamento")}>
-            Ver planos
-          </button>
-        </article>
-      </div>
-    );
-  }
+  useEffect(() => {
+    const el = threadRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [msgs, busy]);
+  if (locked) return <GateCard go={go} />;
   return (
-    <div className="page-stack">
-      <div className="section-summary">
-        <strong>TeamWatcher Intelligence</strong>
-        <span>
-          Pergunte sobre a operação em linguagem natural — a síntese é apoiada
-          nos dados reais do período.
-        </span>
+    <div className={`intel-chat ${variant}`}>
+      <div className="intel-thread" ref={threadRef}>
+        {msgs.map((mm, i) =>
+          mm.role === "user" ? (
+            <div className="chat-row user" key={i}>
+              <div className="chat-bubble user">{mm.text}</div>
+            </div>
+          ) : (
+            <div className="chat-row ai" key={i}>
+              <div className="intel-ai">IA</div>
+              <div className="chat-bubble ai">
+                {mm.intent && (
+                  <div className="intel-badge">
+                    {INTENT_LABEL[mm.intent] || "Análise"}
+                  </div>
+                )}
+                <MarkdownText text={mm.text} />
+              </div>
+            </div>
+          ),
+        )}
+        {busy && (
+          <div className="chat-row ai">
+            <div className="intel-ai">IA</div>
+            <div className="chat-bubble ai typing">Pensando…</div>
+          </div>
+        )}
       </div>
-      <div className="intel-suggestions">
-        {suggestions.map((s) => (
-          <button
-            key={s}
-            className="intel-chip"
-            onClick={() => {
-              setQ(s);
-              ask(s);
-            }}
-          >
-            {s}
-          </button>
-        ))}
-      </div>
+      {suggestions.length > 0 && (
+        <div className="intel-suggestions">
+          {suggestions.map((s) => (
+            <button
+              key={s}
+              className="intel-chip"
+              disabled={busy}
+              onClick={() => ask(s, true)}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="intel-ask">
         <input
           value={q}
           placeholder="Pergunte algo sobre a operação…"
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && q.trim()) ask(q);
+            if (e.key === "Enter" && q.trim() && !busy) ask(q, true);
           }}
         />
         <button
           className="primary"
           disabled={busy || !q.trim()}
-          onClick={() => ask(q)}
+          onClick={() => ask(q, true)}
         >
-          {busy ? "Pensando…" : "Perguntar"}
+          Enviar
         </button>
       </div>
-      {ans && (
-        <article className="card intel-answer">
-          <div className="intel-ai">IA</div>
-          <div>
-            <div className="intel-badge">
-              {INTENT_LABEL[ans.intent] || "Análise"}
-            </div>
-            <p>{ans.answer}</p>
-          </div>
-        </article>
-      )}
+    </div>
+  );
+}
+function Intelligence({ d, go }: { d: Data; go: (s: Section) => void }) {
+  void d;
+  const [digests, setDigests] = useState<Digest[]>([]);
+  useEffect(() => {
+    fetch("/platform-api/dashboard/digests", { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((x) => setDigests(x?.digests || []))
+      .catch(() => {});
+  }, []);
+  return (
+    <div className="page-stack">
+      <div className="section-summary">
+        <strong>TeamWatcher Intelligence</strong>
+        <span>
+          Pergunte sobre a operação em linguagem natural — a síntese é apoiada nos
+          dados reais do período.
+        </span>
+      </div>
+      <article className="card intel-panel">
+        <IntelChat go={go} variant="page" />
+      </article>
       {digests.length > 0 && (
         <div className="digest-section">
           <div className="digest-head">Resumos automáticos</div>
@@ -1895,7 +1981,7 @@ function Intelligence({ d, go }: { d: Data; go: (s: Section) => void }) {
                   </span>
                   <span>{dg.period}</span>
                 </div>
-                <p>{dg.text}</p>
+                <MarkdownText text={dg.text} />
               </article>
             ))}
           </div>
@@ -1906,6 +1992,43 @@ function Intelligence({ d, go }: { d: Data; go: (s: Section) => void }) {
         humana.
       </p>
     </div>
+  );
+}
+function ChatWidget({ d, go }: { d: Data; go: (s: Section) => void }) {
+  const [open, setOpen] = useState(false);
+  const canUse =
+    d.viewer.role === "super_admin" ||
+    d.viewer.role === "org_admin" ||
+    d.viewer.role === "manager";
+  if (!canUse) return null;
+  return (
+    <>
+      <button
+        className={`chat-fab${open ? " open" : ""}`}
+        onClick={() => setOpen((o) => !o)}
+        aria-label="Assistente IA"
+      >
+        {open ? "×" : "IA"}
+      </button>
+      {open && (
+        <div className="chat-widget">
+          <div className="chat-widget-head">
+            <div>
+              <strong>Assistente TeamWatcher</strong>
+              <span>Pergunte sobre a operação</span>
+            </div>
+            <button
+              className="chat-widget-close"
+              onClick={() => setOpen(false)}
+              aria-label="Fechar"
+            >
+              ×
+            </button>
+          </div>
+          <IntelChat go={go} variant="widget" />
+        </div>
+      )}
+    </>
   );
 }
 type AlertRow = {

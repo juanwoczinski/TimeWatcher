@@ -2767,7 +2767,158 @@ h3 {
   font-size: 13.5px;
   line-height: 1.5;
   color: var(--ink);
-  white-space: pre-wrap;
+}
+
+/* Intelligence chat + floating chatbot */
+.intel-panel {
+  padding: 16px 18px;
+}
+.intel-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.intel-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.intel-chat.page .intel-thread {
+  max-height: 46vh;
+}
+.chat-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.chat-row.user {
+  justify-content: flex-end;
+}
+.chat-bubble {
+  max-width: 80%;
+  border-radius: 14px;
+  padding: 12px 15px;
+  font-size: 14px;
+  line-height: 1.55;
+}
+.chat-bubble.user {
+  background: var(--brand);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+.chat-bubble.ai {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  border-bottom-left-radius: 4px;
+}
+.chat-bubble.typing {
+  color: var(--muted);
+  font-style: italic;
+}
+.chat-bubble .md-p {
+  margin: 0 0 8px;
+}
+.chat-bubble .md-p:last-child,
+.chat-bubble .md-li:last-child {
+  margin-bottom: 0;
+}
+.md-h {
+  margin: 0 0 8px;
+  font-weight: 700;
+}
+.md-li {
+  display: flex;
+  gap: 8px;
+  margin: 5px 0;
+}
+.md-bullet {
+  color: var(--blue);
+  flex: 0 0 auto;
+}
+.chat-fab {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 60;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: none;
+  background: var(--brand);
+  color: #fff;
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 16px;
+  cursor: pointer;
+  box-shadow: 0 12px 30px rgba(63, 123, 255, 0.45);
+  transition: transform 0.15s ease;
+}
+.chat-fab:hover {
+  transform: translateY(-2px);
+}
+.chat-fab.open {
+  font-size: 24px;
+  background: var(--ink);
+}
+.chat-widget {
+  position: fixed;
+  right: 24px;
+  bottom: 92px;
+  z-index: 60;
+  width: min(400px, calc(100vw - 40px));
+  max-height: min(620px, calc(100vh - 130px));
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line-2);
+  border-radius: 16px;
+  box-shadow: 0 24px 60px rgba(15, 25, 50, 0.28);
+  overflow: hidden;
+}
+.chat-widget-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  background: linear-gradient(120deg, #0a1226, #10224a);
+  color: #fff;
+}
+.chat-widget-head strong {
+  display: block;
+  font-size: 14px;
+  font-family: var(--display);
+}
+.chat-widget-head span {
+  font-size: 11px;
+  color: #93a4c6;
+}
+.chat-widget-close {
+  background: none;
+  border: none;
+  color: #fff;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+.chat-widget .intel-chat {
+  padding: 14px 16px;
+  overflow: hidden;
+}
+.chat-widget .intel-thread {
+  max-height: 360px;
+}
+.chat-widget .gate-card {
+  margin: 14px;
+}
+@media (max-width: 520px) {
+  .chat-widget {
+    right: 12px;
+    left: 12px;
+    width: auto;
+  }
 }
 
 /* Intelligence */
