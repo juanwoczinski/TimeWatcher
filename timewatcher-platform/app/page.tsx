@@ -15,7 +15,7 @@ type Section =
   | "Visão geral"
   | "Empresas"
   | "Pessoas"
-  | "Times"
+  | "OUs"
   | "Alertas"
   | "Intelligence"
   | "Dispositivos"
@@ -182,7 +182,7 @@ const baseNav: { name: Section; icon: IconName }[] = [
   { name: "Visão geral", icon: "overview" },
   { name: "Empresas", icon: "companies" },
   { name: "Pessoas", icon: "people" },
-  { name: "Times", icon: "teams" },
+  { name: "OUs", icon: "teams" },
   { name: "Alertas", icon: "alerts" },
   { name: "Intelligence", icon: "intelligence" },
   { name: "Dispositivos", icon: "devices" },
@@ -197,7 +197,7 @@ const desc: Record<Section, string> = {
   "Visão geral": "Produtividade, aderência e uso do tempo com dados reais.",
   Empresas: "Governança multiempresa controlada pela Synova.",
   Pessoas: "Jornada, atividade, ativos e capturas por colaborador.",
-  Times: "Grupos de colaboradores e o gestor responsável por cada um.",
+  OUs: "Unidades organizacionais (com hierarquia pai/filha) e o gestor de cada uma.",
   Alertas: "Agente offline, ociosidade longa e desvios de jornada.",
   Intelligence: "Pergunte sobre a operação e receba síntese apoiada nos dados.",
   Dispositivos: "Inventário e saúde dos computadores vinculados.",
@@ -674,7 +674,7 @@ function Dashboard() {
   const nav = baseNav.filter((n) => {
     if (n.name === "Empresas") return data?.viewer.role === "super_admin";
     if (n.name === "Usuários" || n.name === "Faturamento") return isAdmin;
-    if (n.name === "Times" || n.name === "Alertas" || n.name === "Intelligence")
+    if (n.name === "OUs" || n.name === "Alertas" || n.name === "Intelligence")
       return isAdmin || data?.viewer.role === "manager";
     return true;
   });
@@ -930,7 +930,7 @@ function Content({
   if (active === "Visão geral") return <Overview d={data} go={setActive} />;
   if (active === "Empresas") return <Companies d={data} reload={reload} />;
   if (active === "Pessoas") return <People d={data} reload={reload} />;
-  if (active === "Times") return <Teams d={data} />;
+  if (active === "OUs") return <Teams d={data} />;
   if (active === "Alertas") return <Alerts d={data} />;
   if (active === "Intelligence") return <Intelligence d={data} go={setActive} />;
   if (active === "Dispositivos") return <Devices d={data} reload={reload} />;
@@ -1654,7 +1654,7 @@ function PersonCreate({
           <input value={title} onChange={(e) => setTitle(e.target.value)} />
         </label>
         <label>
-          Time
+          OU
           <select value={teamId} onChange={(e) => setTeamId(e.target.value)}>
             <option value="">Sem time</option>
             {teams.map((t) => (
@@ -1734,7 +1734,7 @@ function PersonEditor({
           <input value={email} onChange={(e) => setEmail(e.target.value)} />
         </label>
         <label>
-          Time
+          OU
           <select value={teamId} onChange={(e) => setTeamId(e.target.value)}>
             <option value="">Sem time</option>
             {teams.map((t) => (
@@ -2371,19 +2371,49 @@ type TeamRow = {
   id: string;
   name: string;
   tenantId: string;
+  parentId: string | null;
   managerEmail: string | null;
   managerName: string | null;
   memberCount: number;
-  members: { id: string; name: string; host: string }[];
+  members: { id: string; name: string; host: string | null }[];
 };
 type TeamsData = {
   teams: TeamRow[];
   managers: { email: string; name?: string; role: string }[];
   people: { id: string; name: string; teamId: string | null }[];
 };
+function orderOUs(teams: TeamRow[]): { team: TeamRow; depth: number }[] {
+  const byParent: Record<string, TeamRow[]> = {};
+  teams.forEach((t) => {
+    const key = t.parentId || "__root__";
+    (byParent[key] ||= []).push(t);
+  });
+  const out: { team: TeamRow; depth: number }[] = [];
+  const seen = new Set<string>();
+  const walk = (parent: string, depth: number) => {
+    (byParent[parent] || [])
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .forEach((t) => {
+        if (seen.has(t.id)) return;
+        seen.add(t.id);
+        out.push({ team: t, depth });
+        walk(t.id, depth + 1);
+      });
+  };
+  walk("__root__", 0);
+  teams.forEach((t) => {
+    if (!seen.has(t.id)) {
+      seen.add(t.id);
+      out.push({ team: t, depth: 0 });
+    }
+  });
+  return out;
+}
 function Teams({ d }: { d: Data }) {
   const [td, setTd] = useState<TeamsData | null>(null);
   const [name, setName] = useState("");
+  const [parentId, setParentId] = useState("");
   const [managerEmail, setManagerEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const canManage =
@@ -2397,44 +2427,69 @@ function Teams({ d }: { d: Data }) {
   useEffect(() => {
     load();
   }, [load]);
+  async function post(path: string, body: object) {
+    await fetch(`/platform-api/dashboard/${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(body),
+    });
+  }
   async function create() {
     if (!name.trim()) return;
     setBusy(true);
-    await fetch("/platform-api/dashboard/teams", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, managerEmail }),
-    });
+    await post("teams", { name, parentId: parentId || null, managerEmail });
     setBusy(false);
     setName("");
+    setParentId("");
     setManagerEmail("");
     load();
   }
   async function remove(id: string) {
-    if (!confirm("Excluir este time? Os colaboradores ficam sem time.")) return;
-    await fetch("/platform-api/dashboard/teams/delete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id }),
-    });
+    if (
+      !confirm(
+        "Excluir esta OU? As filhas sobem de nível e as pessoas ficam sem OU.",
+      )
+    )
+      return;
+    await post("teams/delete", { id });
     load();
   }
+  async function assign(personId: string, ouId: string | null) {
+    await post("people", { id: personId, teamId: ouId });
+    load();
+  }
+  const ordered = td ? orderOUs(td.teams) : [];
   return (
     <div className="page-stack">
       {canManage && (
         <article className="card">
           <div className="card-head">
             <div>
-              <h2>Novo time</h2>
-              <p>Agrupe colaboradores e defina um gestor responsável.</p>
+              <h2>Nova unidade (OU)</h2>
+              <p>
+                Monte a hierarquia da organização e defina o gestor de cada OU.
+              </p>
             </div>
           </div>
           <div className="invite-form">
             <input
-              placeholder="Nome do time (ex.: Vendas)"
+              placeholder="Nome da OU (ex.: Comercial)"
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
+            <select
+              value={parentId}
+              onChange={(e) => setParentId(e.target.value)}
+            >
+              <option value="">OU raiz (sem pai)</option>
+              {ordered.map(({ team, depth }) => (
+                <option key={team.id} value={team.id}>
+                  {"— ".repeat(depth)}
+                  {team.name}
+                </option>
+              ))}
+            </select>
             <select
               value={managerEmail}
               onChange={(e) => setManagerEmail(e.target.value)}
@@ -2451,59 +2506,93 @@ function Teams({ d }: { d: Data }) {
               onClick={create}
               disabled={busy || !name.trim()}
             >
-              {busy ? "Criando…" : "Criar time"}
+              {busy ? "Criando…" : "Criar OU"}
             </button>
           </div>
         </article>
       )}
       <div className="section-summary">
-        <strong>{td?.teams.length ?? 0} time(s)</strong>
+        <strong>{td?.teams.length ?? 0} unidade(s) organizacional(is)</strong>
         <span>
-          Cada gestor enxerga apenas os colaboradores dos times sob sua
-          responsabilidade.
+          O gestor de uma OU enxerga também as OUs filhas. Atribua pessoas aqui
+          ou em Pessoas → Editar.
         </span>
       </div>
       {td && td.teams.length === 0 ? (
-        <State text="Nenhum time criado ainda." />
+        <State text="Nenhuma OU criada ainda." />
       ) : (
-        <div className="team-grid">
-          {td?.teams.map((t) => (
-            <article className="card team-card" key={t.id}>
-              <div className="card-head">
-                <div>
-                  <h2>{t.name}</h2>
-                  <p>
-                    {t.managerName || t.managerEmail
-                      ? `Gestor: ${t.managerName || t.managerEmail}`
-                      : "Sem gestor definido"}
-                  </p>
+        <div className="ou-tree">
+          {ordered.map(({ team, depth }) => {
+            const outside = (td?.people || []).filter(
+              (p) => p.teamId !== team.id,
+            );
+            return (
+              <article
+                className="card ou-card"
+                key={team.id}
+                style={{ marginLeft: `${depth * 26}px` }}
+              >
+                {depth > 0 && <span className="ou-branch" />}
+                <div className="card-head">
+                  <div>
+                    <h2>{team.name}</h2>
+                    <p>
+                      {team.managerName || team.managerEmail
+                        ? `Gestor: ${team.managerName || team.managerEmail}`
+                        : "Sem gestor definido"}
+                    </p>
+                  </div>
+                  <span className="pill offline">
+                    {team.memberCount} pessoa(s)
+                  </span>
                 </div>
-                <span className="pill offline">{t.memberCount} membro(s)</span>
-              </div>
-              <div className="team-members">
-                {t.members.length ? (
-                  t.members.map((m) => (
-                    <span className="member-chip" key={m.id}>
-                      <span className="avatar tiny">{initials(m.name)}</span>
-                      {m.name}
-                    </span>
-                  ))
-                ) : (
-                  <State text="Sem colaboradores. Atribua em Pessoas → Editar." />
+                <div className="team-members">
+                  {team.members.length ? (
+                    team.members.map((m) => (
+                      <span className="member-chip" key={m.id}>
+                        <span className="avatar tiny">{initials(m.name)}</span>
+                        {m.name}
+                        {canManage && (
+                          <button
+                            className="chip-x"
+                            title="Remover da OU"
+                            onClick={() => assign(m.id, null)}
+                          >
+                            ×
+                          </button>
+                        )}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="ou-empty">Sem pessoas nesta OU.</span>
+                  )}
+                </div>
+                {canManage && (
+                  <div className="ou-actions">
+                    <select
+                      value=""
+                      onChange={(e) => {
+                        if (e.target.value) assign(e.target.value, team.id);
+                      }}
+                    >
+                      <option value="">+ Adicionar pessoa…</option>
+                      {outside.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className="btn ghost danger"
+                      onClick={() => remove(team.id)}
+                    >
+                      Excluir OU
+                    </button>
+                  </div>
                 )}
-              </div>
-              {canManage && (
-                <div className="team-actions">
-                  <button
-                    className="btn ghost danger"
-                    onClick={() => remove(t.id)}
-                  >
-                    Excluir time
-                  </button>
-                </div>
-              )}
-            </article>
-          ))}
+              </article>
+            );
+          })}
         </div>
       )}
     </div>

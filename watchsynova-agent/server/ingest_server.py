@@ -561,10 +561,26 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     }
 
 
+def descendant_ou_ids(config: dict, tenant_id: str, roots: set) -> set:
+    """All OU ids in the subtree(s) rooted at `roots` (inclusive of the roots)."""
+    children: dict = {}
+    for team in config.get("teams", []):
+        if team.get("tenantId") == tenant_id:
+            children.setdefault(team.get("parentId"), []).append(team["id"])
+    result = set(roots); stack = list(roots)
+    while stack:
+        node = stack.pop()
+        for child in children.get(node, []):
+            if child not in result:
+                result.add(child); stack.append(child)
+    return result
+
+
 def managed_team_ids(config: dict, email: str, tenant_id: str) -> set:
-    """Team ids a manager is responsible for."""
+    """OU ids a manager is responsible for — the OUs they manage plus all descendants."""
     target = (email or "").lower()
-    return {t["id"] for t in config.get("teams", []) if t.get("tenantId") == tenant_id and (t.get("managerEmail") or "").lower() == target}
+    direct = {t["id"] for t in config.get("teams", []) if t.get("tenantId") == tenant_id and (t.get("managerEmail") or "").lower() == target}
+    return descendant_ou_ids(config, tenant_id, direct)
 
 
 def manager_hosts(config: dict, email: str, tenant_id: str) -> set:
@@ -1207,15 +1223,25 @@ class Handler(BaseHTTPRequestHandler):
                     name = str(payload.get("name", "")).strip()
                     if not name: return self.send_json(400, {"error": "name_required"})
                     t_tenant = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
-                    tid = re.sub(r"[^a-z0-9-]", "-", str(payload.get("id") or name).lower()).strip("-") or "time"
+                    tid = re.sub(r"[^a-z0-9-]", "-", str(payload.get("id") or name).lower()).strip("-") or "ou"
                     manager_email = str(payload.get("managerEmail", "")).strip().lower() or None
-                    team = {"id": tid, "tenantId": t_tenant, "name": name[:80], "managerEmail": manager_email}
+                    parent_id = str(payload.get("parentId", "")).strip() or None
+                    if parent_id:
+                        if parent_id == tid or parent_id in descendant_ou_ids(config, t_tenant, {tid}):
+                            parent_id = None
+                        elif not any(t["id"] == parent_id and t.get("tenantId") == t_tenant for t in config.get("teams", [])):
+                            parent_id = None
+                    team = {"id": tid, "tenantId": t_tenant, "name": name[:80], "managerEmail": manager_email, "parentId": parent_id}
                     teams = config.setdefault("teams", [])
                     config["teams"] = [t for t in teams if not (t["id"] == tid and t.get("tenantId") == t_tenant)] + [team]
-                    save_config(config); audit("team.upsert", current["email"], {"id": tid, "manager": manager_email}); return self.send_json(201, team)
+                    save_config(config); audit("team.upsert", current["email"], {"id": tid, "manager": manager_email, "parent": parent_id}); return self.send_json(201, team)
                 if parsed.path == "/dashboard/teams/delete":
                     tid = str(payload.get("id", "")).strip()
+                    deleted = next((t for t in config.get("teams", []) if t["id"] == tid), None)
+                    new_parent = deleted.get("parentId") if deleted else None
                     config["teams"] = [t for t in config.get("teams", []) if not (t["id"] == tid and (current["role"] == "super_admin" or t.get("tenantId") == current["tenantId"]))]
+                    for team in config["teams"]:
+                        if team.get("parentId") == tid: team["parentId"] = new_parent
                     for person in config.get("people", []):
                         if person.get("teamId") == tid: person["teamId"] = None
                     save_config(config); audit("team.delete", current["email"], {"id": tid}); return self.send_json(200, {"deleted": tid})
@@ -1462,7 +1488,8 @@ class Handler(BaseHTTPRequestHandler):
         tenant_id = params.get("tenant", [current["tenantId"]])[0] if is_super else current["tenantId"]
         teams = [t for t in config.get("teams", []) if t.get("tenantId") == tenant_id]
         if current["role"] == "manager":
-            teams = [t for t in teams if (t.get("managerEmail") or "").lower() == current["email"].lower()]
+            managed = managed_team_ids(config, current["email"], tenant_id)
+            teams = [t for t in teams if t["id"] in managed]
         people = [p for p in config.get("people", []) if p.get("tenantId") == tenant_id]
         accounts = config.get("accounts", {})
         def enrich(team: dict) -> dict:
