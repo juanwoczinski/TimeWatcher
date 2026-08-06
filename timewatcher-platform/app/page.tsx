@@ -3368,17 +3368,20 @@ function Gallery({ device, person, tenantId }: { device: Device; person: string;
 }
 function Installers({ d }: { d: Data }) {
   const [token, setToken] = useState(""),
-    [busy, setBusy] = useState(false);
-  async function generate() {
+    [busy, setBusy] = useState(false),
+    [windowsPackage, setWindowsPackage] = useState("");
+  async function generateWindowsPackage() {
     setBusy(true);
-    const r = await fetch("/platform-api/dashboard/enrollments", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tenantId: d.tenant.id }),
-    });
-    const x = await r.json();
-    setToken(x.token || "");
-    setBusy(false);
+    try {
+      const r = await fetch("/platform-api/dashboard/enrollments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tenantId: d.tenant.id }),
+      });
+      const x = await r.json();
+      setToken(x.token || "");
+      setWindowsPackage(x.token ? `/platform-api/dashboard/enrollments/windows?token=${encodeURIComponent(x.token)}` : "");
+    } finally { setBusy(false); }
   }
   return (
     <div className="page-stack">
@@ -3405,10 +3408,10 @@ function Installers({ d }: { d: Data }) {
             <OsLogo os="windows" />
           </span>
           <h2>Windows individual</h2>
-          <p>Instalação com interface para o usuário final.</p>
-          <a className="download" href="/downloads/TimeWatcher-Windows.msi">
-            Baixar .msi
-          </a>
+          <p>Gera um pacote temporário já vinculado à empresa e inicia a coleta ao concluir.</p>
+          <button className="download" disabled={busy} onClick={generateWindowsPackage}>
+            {busy ? "Preparando…" : "Gerar instalador Windows"}
+          </button>
         </article>
         <article className="install-card ready">
           <span className="os-badge">
@@ -3418,7 +3421,7 @@ function Installers({ d }: { d: Data }) {
           <p>
             Use o mesmo pacote com parâmetros silenciosos em Intune, GPO ou RMM.
           </p>
-          <button onClick={generate}>
+          <button onClick={generateWindowsPackage}>
             {busy ? "Gerando…" : "Gerar token por 7 dias"}
           </button>
         </article>
@@ -3430,6 +3433,8 @@ function Installers({ d }: { d: Data }) {
             Use apenas no canal seguro da equipe de TI. Ele expira em 7 dias.
           </p>
           <code>{token}</code>
+          {windowsPackage && <a className="download" href={windowsPackage}>Baixar pacote Windows configurado (.zip)</a>}
+          <p>Extraia o arquivo e execute <strong>Instalar-TimeWatcher.cmd</strong> como administrador. Ele instala o MSI, registra a inicialização automática e inicia a coleta imediatamente.</p>
           <pre>{`SERVER_URL=https://timewatcher.32-193-139-223.sslip.io TENANT_ID=${d.tenant.id} ENROLLMENT_TOKEN=${token}`}</pre>
         </article>
       )}

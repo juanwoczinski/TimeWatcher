@@ -1,5 +1,14 @@
 $ErrorActionPreference = "Continue"
 
+$LogDirectory = Join-Path $env:ProgramData "TimeWatcher"
+$LogPath = Join-Path $LogDirectory "agent.log"
+function Write-AgentLog([string]$Message) {
+  try {
+    New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
+    "$(Get-Date -Format o) $Message" | Add-Content -Path $LogPath -Encoding UTF8
+  } catch {}
+}
+
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -32,10 +41,18 @@ function Get-IdleSeconds {
 }
 
 $settings = Get-ItemProperty "HKLM:\Software\TimeWatcher" -ErrorAction SilentlyContinue
-if (-not $settings.ServerUrl -or -not $settings.EnrollmentToken) { exit 2 }
+if (-not $settings.ServerUrl -or -not $settings.EnrollmentToken -or -not $settings.TenantId) {
+  Write-AgentLog "ERRO configuracao ausente: reinstale usando o pacote vinculado ao tenant."
+  exit 2
+}
+$mutex = $null
+try {
+  $mutex = New-Object System.Threading.Mutex($false, "Global\\TimeWatcherAgent")
+  if (-not $mutex.WaitOne(0, $false)) { Write-AgentLog "Instancia ja em execucao."; exit 0 }
+} catch {}
 $headers = @{ Authorization = "Bearer $($settings.EnrollmentToken)" }
 $device = $env:COMPUTERNAME
-$AgentVersion = "0.4.0"
+$AgentVersion = "0.4.1"
 $UpdateStatePath = Join-Path $env:ProgramData "TimeWatcher\update-state.json"
 $LastUpdateCheck = [DateTime]::MinValue
 
@@ -110,6 +127,9 @@ while ($true) {
     Invoke-RestMethod -Method Post -Uri "$($settings.ServerUrl)/ingest/v1/activity-events" -Headers $headers -ContentType "application/json" -Body $windowPayload | Out-Null
     Invoke-RestMethod -Method Post -Uri "$($settings.ServerUrl)/ingest/v1/activity-events" -Headers $headers -ContentType "application/json" -Body $afkPayload | Out-Null
     Invoke-RestMethod -Method Post -Uri "$($settings.ServerUrl)/ingest/v1/activity-events" -Headers $headers -ContentType "application/json" -Body $heartbeatPayload | Out-Null
-  } catch {}
+    Write-AgentLog "Heartbeat enviado para $device."
+  } catch {
+    Write-AgentLog "ERRO de envio: $($_.Exception.Message)"
+  }
   Start-Sleep -Seconds 60
 }

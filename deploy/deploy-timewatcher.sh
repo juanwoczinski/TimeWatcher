@@ -11,6 +11,8 @@ UPLOAD_INSTALLERS="${TIMEWATCHER_UPLOAD_INSTALLERS:-0}"
 REBUILD_INSTALLERS="${TIMEWATCHER_REBUILD_INSTALLERS:-0}"
 MAC_AGENT_VERSION="0.4.0"
 MAC_AGENT_SHA=""
+WINDOWS_AGENT_VERSION="0.4.1"
+WINDOWS_AGENT_SHA=""
 
 if [[ ! -f "$SSH_KEY" ]]; then
   echo "Chave SSH não encontrada: $SSH_KEY" >&2
@@ -30,11 +32,18 @@ if [[ "$UPLOAD_INSTALLERS" == "1" ]]; then
     "$PROJECT_DIR/installers/macos/build-pkg.sh" >/dev/null
   fi
   MAC_AGENT_SHA="$(shasum -a 256 "$PROJECT_DIR/timewatcher-platform/public/downloads/TimeWatcher-Agent-macOS.zip" | awk '{print $1}')"
+  WINDOWS_MSI="$PROJECT_DIR/timewatcher-platform/public/downloads/TimeWatcher-Windows.msi"
+  if [[ ! -f "$WINDOWS_MSI" ]]; then
+    echo "MSI do Windows não encontrado: gere-o com o workflow Build Windows MSI antes do deploy." >&2
+    exit 1
+  fi
+  WINDOWS_AGENT_SHA="$(shasum -a 256 "$WINDOWS_MSI" | awk '{print $1}')"
   # ZIP files are already compressed. Sending only the active individual
   # installer avoids re-uploading legacy PKG/MSI artifacts on every release.
   rsync -a --checksum --partial --timeout=120 --progress -e "$RSYNC_SSH" \
     "$PROJECT_DIR/timewatcher-platform/public/downloads/TimeWatcher-Agent-macOS.zip" \
     "$PROJECT_DIR/timewatcher-platform/public/downloads/TimeWatcher-Agent-macOS.zip.sha256" \
+    "$WINDOWS_MSI" \
     "$REMOTE_HOST:$REMOTE_STAGE/downloads/"
 fi
 scp -i "$SSH_KEY" \
@@ -97,6 +106,8 @@ wait_url http://127.0.0.1:3110/
 if [[ '$UPLOAD_INSTALLERS' == '1' ]]; then
   sudo bash '$REMOTE_STAGE/config/publish-agent-release.sh' macos '$MAC_AGENT_VERSION' \
     'https://timewatcher.32-193-139-223.sslip.io/downloads/TimeWatcher-Agent-macOS.zip' '$MAC_AGENT_SHA'
+  sudo bash '$REMOTE_STAGE/config/publish-agent-release.sh' windows '$WINDOWS_AGENT_VERSION' \
+    'https://timewatcher.32-193-139-223.sslip.io/downloads/TimeWatcher-Windows.msi' '$WINDOWS_AGENT_SHA'
 fi
 rm -rf '$REMOTE_STAGE'
 REMOTE

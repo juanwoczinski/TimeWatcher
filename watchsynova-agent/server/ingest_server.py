@@ -17,6 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -41,6 +42,7 @@ SESSION_SECRET_ENV = os.environ.get("TIMEWATCHER_SESSION_SECRET", "")
 BOOTSTRAP_ADMIN = os.environ.get("TIMEWATCHER_BOOTSTRAP_ADMIN", "")
 PUBLIC_URL = os.environ.get("TIMEWATCHER_PUBLIC_URL", "https://timewatcher.32-193-139-223.sslip.io")
 AUDIT_FILE = DATA_DIR / "audit.log"
+WINDOWS_MSI_FILE = Path(os.environ.get("TIMEWATCHER_WINDOWS_MSI", "/opt/timewatcher-platform/public/downloads/TimeWatcher-Windows.msi"))
 RETENTION_DAYS = int(os.environ.get("TIMEWATCHER_RETENTION_DAYS", "180") or "0")
 LOGIN_MAX_ATTEMPTS = 8
 LOGIN_WINDOW_SECONDS = 300
@@ -1630,6 +1632,57 @@ class Handler(BaseHTTPRequestHandler):
     def read_json(self) -> dict:
         length = int(self.headers.get("Content-Length", "0")); return json.loads(self.rfile.read(length)) if 0 < length <= 1024 * 1024 else {}
 
+    def serve_windows_enrollment_package(self, token: str) -> None:
+        """Deliver the current MSI plus a short-lived, tenant-bound launcher.
+
+        An MSI cannot receive tenant properties from a normal browser download.
+        The launcher invokes msiexec with the one-time enrollment properties and
+        starts the user-session collector immediately after installation.
+        """
+        tenant_id = ingest_tenant(token)
+        if not tenant_id:
+            return self.send_json(401, {"error": "invalid_or_expired_enrollment"})
+        if not WINDOWS_MSI_FILE.is_file():
+            return self.send_json(503, {"error": "windows_installer_unavailable"})
+        server_url = PUBLIC_URL.replace('"', '')
+        safe_tenant = re.sub(r"[^a-z0-9-]", "", tenant_id.lower())
+        safe_token = re.sub(r"[^A-Za-z0-9_-]", "", token)
+        launcher = f'''@echo off
+setlocal
+set "MSI=%~dp0TimeWatcher-Windows.msi"
+if not exist "%MSI%" (
+  echo Arquivo TimeWatcher-Windows.msi nao encontrado.
+  pause
+  exit /b 1
+)
+echo Instalando o agente TimeWatcher...
+msiexec.exe /i "%MSI%" SERVER_URL="{server_url}" TENANT_ID="{safe_tenant}" ENROLLMENT_TOKEN="{safe_token}" /passive /norestart
+set "RESULT=%ERRORLEVEL%"
+if not "%RESULT%"=="0" if not "%RESULT%"=="3010" (
+  echo A instalacao falhou. Codigo: %RESULT%
+  echo Consulte C:\\ProgramData\\TimeWatcher\\agent.log e envie-o ao suporte.
+  pause
+  exit /b %RESULT%
+)
+start "" /b powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\\Program Files\\TimeWatcher\\TimeWatcherAgent.ps1"
+echo Instalacao concluida. O TimeWatcher iniciou a coleta; o primeiro sinal pode levar ate 1 minuto.
+timeout /t 5 >nul
+exit /b 0
+'''
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.write(WINDOWS_MSI_FILE, "TimeWatcher-Windows.msi")
+            archive.writestr("Instalar-TimeWatcher.cmd", launcher)
+            archive.writestr("LEIA-ME.txt", "Extraia os arquivos e execute Instalar-TimeWatcher.cmd como administrador. O pacote vence em 7 dias.\r\n")
+        body = output.getvalue()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", 'attachment; filename="TimeWatcher-Windows-Setup.zip"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def authorized_admin(self, current: dict) -> bool:
         return current["role"] in ("super_admin", "org_admin")
 
@@ -1706,6 +1759,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = agent_update_manifest(config, tenant_id, hostname, platform_name, current_version)
                 save_config(config)
             return self.send_json(200, result)
+        if parsed.path == "/dashboard/enrollments/windows":
+            return self.serve_windows_enrollment_package(str(params.get("token", [""])[0]))
         if parsed.path.startswith("/dashboard/") and not current: return self.send_json(401, {"error": "unauthenticated"})
         if current and current["role"] in ("member", "employee") and (parsed.path.startswith("/dashboard/screenshots") or parsed.path in ("/dashboard/teams", "/dashboard/alerts", "/dashboard/billing", "/dashboard/policies", "/dashboard/audit", "/dashboard/digests", "/dashboard/trends", "/dashboard/intelligence", "/dashboard/invites")):
             return self.send_json(403, {"error": "forbidden"})

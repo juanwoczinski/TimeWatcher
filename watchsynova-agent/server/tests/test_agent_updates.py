@@ -1,6 +1,9 @@
 import os
 import sys
+import io
+import tempfile
 import unittest
+import zipfile
 
 os.environ.setdefault("WATCHSYNOVA_INGEST_TOKEN", "test-token")
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -54,6 +57,33 @@ class AgentUpdateTests(unittest.TestCase):
         device = config["devices"]["synova:mac.local"]
         self.assertEqual(device["inventory"]["model"], "Mac17,2")
         self.assertEqual(device["software"], ["TimeWatcher"])
+
+    def test_windows_enrollment_launcher_is_tenant_bound(self):
+        token = "safe-enrollment-token"
+        config = server.default_config()
+        config["enrollments"] = [{"tenantId": "synova", "tokenHash": server.hashlib.sha256(token.encode()).hexdigest(), "expiresAt": "2099-01-01T00:00:00+00:00"}]
+        original = server.load_config
+        original_msi = server.WINDOWS_MSI_FILE
+        try:
+            server.load_config = lambda: config
+            with tempfile.TemporaryDirectory() as directory:
+                msi = os.path.join(directory, "TimeWatcher-Windows.msi")
+                with open(msi, "wb") as artifact:
+                    artifact.write(b"test-msi")
+                server.WINDOWS_MSI_FILE = server.Path(msi)
+                handler = object.__new__(server.Handler)
+                handler.wfile = io.BytesIO()
+                handler.send_response = lambda status: setattr(handler, "status", status)
+                handler.send_header = lambda *_: None
+                handler.end_headers = lambda: None
+                handler.serve_windows_enrollment_package(token)
+                self.assertEqual(handler.status, 200)
+                with zipfile.ZipFile(io.BytesIO(handler.wfile.getvalue())) as package:
+                    self.assertEqual(set(package.namelist()), {"TimeWatcher-Windows.msi", "Instalar-TimeWatcher.cmd", "LEIA-ME.txt"})
+                    self.assertIn('TENANT_ID="synova"', package.read("Instalar-TimeWatcher.cmd").decode())
+        finally:
+            server.load_config = original
+            server.WINDOWS_MSI_FILE = original_msi
 
 
 if __name__ == "__main__":
