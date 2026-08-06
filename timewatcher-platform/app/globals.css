@@ -2531,6 +2531,60 @@ h3 {
   border-color: var(--blue);
   box-shadow: 0 0 0 3px rgba(63, 123, 255, 0.15);
 }
+
+/* People directory — deliberately scoped so tables in reports stay compact. */
+.people-toolbar {
+  grid-template-columns: minmax(320px, 1fr) minmax(280px, 360px) auto;
+  align-items: center;
+  padding: 4px 0 6px;
+}
+.people-toolbar .section-summary {
+  min-height: 110px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 7px;
+  padding: 20px 24px;
+  border: 1px solid #1d3461;
+  border-radius: 22px;
+  background: linear-gradient(120deg, #071533 0%, #10295a 100%);
+  box-shadow: 0 16px 34px rgba(14, 36, 82, 0.14);
+}
+.people-toolbar .section-summary strong {
+  color: #fff;
+  font-size: 23px;
+  letter-spacing: -0.03em;
+}
+.people-toolbar .section-summary span { color: #aabddd; font-size: 13px; }
+.people-toolbar .people-search { height: 54px; width: 100%; box-shadow: none; }
+.people-toolbar .people-add-btn { min-height: 54px; padding-inline: 18px; border-radius: 13px; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow); }
+.data-table { width: 100%; min-width: 980px; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
+.people-table th { height: 48px; padding: 0 18px; color: var(--faint); background: #f8faff; border-bottom: 1px solid var(--line); font-size: 10px; font-weight: 750; letter-spacing: .08em; text-align: left; text-transform: uppercase; white-space: nowrap; }
+.people-table th:first-child { width: 27%; padding-left: 22px; }
+.people-table th:nth-child(2) { width: 13%; }
+.people-table th:nth-child(3) { width: 13%; }
+.people-table th:nth-child(4) { width: 11%; }
+.people-table th:nth-child(5), .people-table th:nth-child(6), .people-table th:nth-child(7) { width: 10%; }
+.people-table th:last-child { width: 16%; }
+.people-table td { height: 76px; padding: 12px 18px; border-bottom: 1px solid var(--line); color: var(--ink); font-size: 13px; vertical-align: middle; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.people-table td:first-child { padding-left: 22px; }
+.people-table tbody tr { cursor: pointer; transition: background .16s ease; }
+.people-table tbody tr:hover { background: #f7faff; }
+.people-table tbody tr.sel { background: #eff5ff; box-shadow: inset 3px 0 0 var(--cyan); }
+.people-table tbody tr:last-child td { border-bottom: 0; }
+.people-table .cell-person { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.people-table .avatar.tiny { flex: 0 0 32px; width: 32px; height: 32px; font-size: 10px; background: linear-gradient(135deg, #23487f, #142b57); color: #e5efff; }
+.people-table .cell-person-meta { display: grid; gap: 3px; min-width: 0; }
+.people-table .cell-person-meta strong { overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
+.people-table .cell-person-meta small { overflow: hidden; color: var(--faint); text-overflow: ellipsis; font-size: 11px; }
+.people-table .num { color: #23324c; font-family: var(--data); font-variant-numeric: tabular-nums; text-align: right; }
+.people-table th.num { text-align: right; }
+.people-table .pill { justify-content: center; min-width: 72px; }
+@media (max-width: 900px) {
+  .people-toolbar { grid-template-columns: 1fr 1fr; }
+  .people-toolbar .section-summary { grid-column: 1 / -1; }
+}
 .roster {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
