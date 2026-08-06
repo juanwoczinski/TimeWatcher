@@ -971,7 +971,7 @@ function Dashboard() {
         )}
       </section>
       {data && <ChatWidget d={data} go={setActive} />}
-      {data && tourOpen && <FirstLoginTour d={data} onFinish={finishTour} />}
+      {data && tourOpen && <FirstLoginTour d={data} onFinish={finishTour} onNavigate={setActive} />}
     </main>
   );
 }
@@ -1027,17 +1027,18 @@ function Content({
 function State({ text }: { text: string }) {
   return <div className="state-card">{text}</div>;
 }
-function FirstLoginTour({ d, onFinish }: { d: Data; onFinish: () => void }) {
+function FirstLoginTour({ d, onFinish, onNavigate }: { d: Data; onFinish: () => void; onNavigate: (section: Section) => void }) {
   const [step, setStep] = useState(0);
   const personalNeedsLink = !d.selfLink?.linked;
   const steps = [
-    { title: `Bem-vindo ao ${d.tenant.name}`, text: "Este painel transforma a telemetria autorizada do agente em jornada, foco, uso de aplicações e URLs. O conteúdo digitado não é coletado." },
-    { title: "Confira a identidade do dispositivo", text: personalNeedsLink ? "Sua visão pessoal ainda precisa ser vinculada a um dispositivo. Abra Minha visão e confirme o host que pertence a você." : "Seu perfil já está vinculado a um dispositivo. A sua visão sempre mostrará somente essa telemetria." },
-    { title: "Use os filtros para investigar", text: "Altere o período e o escopo para acompanhar atividade, URLs, teclado, mouse e aderência à jornada sem perder o contexto." },
-    { title: "Relatórios e jornadas", text: "Em Relatórios você pode exportar dados reais ou agendar entregas. Administradores também fecham o mês com um snapshot auditável." },
+    { menu: "Visão geral" as Section, title: `Conheça a visão geral`, text: "Acompanhe tempo ativo, foco, jornada e alertas da operação em um único lugar." },
+    { menu: "Pessoas" as Section, title: "Pessoas e dispositivos", text: personalNeedsLink ? "Aqui você também confirma o dispositivo que pertence a você e mantém a identidade da telemetria correta." : "Cadastre colaboradores, vincule dispositivos e atribua jornadas por pessoa." },
+    { menu: "Atividades" as Section, title: "Atividades detalhadas", text: "Investigue aplicações, URLs, cliques, teclado e histórico por período — sempre a partir da coleta real." },
+    { menu: "Relatórios" as Section, title: "Relatórios e fechamento", text: "Visualize o relatório na tela, exporte quando precisar e programe entregas. Admins fecham o mês com rastreabilidade." },
   ];
   const current = steps[step];
-  return <div className="tour-backdrop" role="dialog" aria-modal="true" aria-label="Tour inicial"><section className="tour-modal"><span>PRIMEIRO ACESSO · {step + 1}/{steps.length}</span><h2>{current.title}</h2><p>{current.text}</p><div className="tour-progress">{steps.map((_, i)=><i key={i} className={i <= step ? "on" : ""}/>)}</div><footer><button onClick={onFinish}>Pular tour</button>{step + 1 < steps.length ? <button className="primary" onClick={()=>setStep(step+1)}>Continuar</button> : <button className="primary" onClick={onFinish}>Concluir</button>}</footer></section></div>;
+  const next = () => { if (step + 1 >= steps.length) return onFinish(); const following = step + 1; setStep(following); onNavigate(steps[following].menu); };
+  return <div className="tour-backdrop" role="dialog" aria-modal="false" aria-label="Guia inicial"><section className="tour-modal"><span>GUIA RÁPIDO · {step + 1}/{steps.length}</span><div className="tour-menu-name">{current.menu}</div><h2>{current.title}</h2><p>{current.text}</p><div className="tour-progress">{steps.map((_, i)=><i key={i} className={i <= step ? "on" : ""}/>)}</div><footer><button onClick={onFinish}>Encerrar</button><button className="primary" onClick={next}>{step + 1 < steps.length ? "Próximo" : "Concluir"}</button></footer></section></div>;
 }
 function Metric({
   label,
@@ -3170,6 +3171,7 @@ function Reports({
   reload: () => void;
 }) {
   const q = new URLSearchParams({ period, tenant, scope });
+  const [previewOpen, setPreviewOpen] = useState(false);
   const personal = scope === "self" || d.viewer.role === "member" || d.viewer.role === "employee";
   const manager = d.viewer.role === "manager" && !personal;
   const topProductive = d.apps.find((app) => app.classification === "productive");
@@ -3190,6 +3192,7 @@ function Reports({
           </p>
         </div>
         <div>
+          <button className="report-preview-button" onClick={() => setPreviewOpen(true)}>Visualizar relatório</button>
           <a href={`/platform-api/dashboard/export.csv?${q}`}>Exportar CSV</a>
           <a href={`/platform-api/dashboard/export.json?${q}`}>Exportar JSON</a>
         </div>
@@ -3238,8 +3241,13 @@ function Reports({
           )}
         </article>
       </div>
+      {previewOpen && <ReportPreview d={d} personal={personal} manager={manager} onClose={() => setPreviewOpen(false)} />}
     </div>
   );
+}
+function ReportPreview({ d, personal, manager, onClose }: { d: Data; personal: boolean; manager: boolean; onClose: () => void }) {
+  const reportTitle = personal ? "Relatório pessoal de produtividade" : manager ? "Relatório do time" : "Relatório executivo";
+  return <div className="report-preview-backdrop" role="dialog" aria-modal="true" aria-label="Prévia do relatório"><section className="report-preview"><header><div><span>TIMEWATCHER · RELATÓRIO RENDERIZADO</span><h2>{reportTitle}</h2><p>{d.tenant.name} · {new Date(d.range.start).toLocaleDateString("pt-BR")} — {new Date(d.range.end).toLocaleDateString("pt-BR")}</p></div><div><button onClick={() => window.print()}>Imprimir / PDF</button><button className="close-preview" onClick={onClose}>Fechar</button></div></header><div className="preview-kpis"><div><span>Monitorado</span><b>{duration(d.summary.trackedSeconds)}</b></div><div><span>Ativo</span><b>{duration(d.summary.activeSeconds)}</b></div><div><span>Produtivo</span><b>{duration(d.summary.productiveSeconds)}</b></div><div><span>Produtividade</span><b>{d.summary.focusScore}%</b></div><div><span>Jornada</span><b>{Math.round(d.summary.scheduleAdherence || 0)}%</b></div></div><div className="preview-columns"><article><h3>Aplicações principais</h3>{d.apps.slice(0, 8).map(x => <div className="preview-row" key={x.name}><span>{x.name}<small>{x.classification === "productive" ? "Produtivo" : x.classification === "unproductive" ? "Não produtivo" : "Neutro"}</small></span><b>{x.duration}</b></div>) || <p>Sem aplicações no período.</p>}</article><article><h3>Sites e URLs principais</h3>{d.urls.slice(0, 8).map(x => <div className="preview-row" key={x.url}><span>{x.domain}<small>{x.title || x.classification}</small></span><b>{x.duration}</b></div>) || <p>Sem URLs no período.</p>}</article></div><footer>Dados gerados em {date(d.generatedAt)} · fonte: agentes vinculados e telemetria autorizada.</footer></section></div>;
 }
 function ReportScheduling({ d }: { d: Data }) {
   const [items, setItems] = useState<{id: string; email: string; frequency: string; deliveryStatus?: string; lastSentAt?: string}[]>([]);
