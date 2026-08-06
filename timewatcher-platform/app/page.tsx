@@ -99,6 +99,7 @@ type Device = {
   inventory?: Record<string, string>;
   observedIp?: string | null;
   signals?: Record<string, string>;
+  software?: string[];
 };
 type Schedule = {
   id: string;
@@ -2997,6 +2998,7 @@ function DeviceDetail({
       </dl>
       {(d.inventory?.os || d.inventory?.memoryGB) && <p className="device-inventory">{d.inventory?.os} {d.inventory?.osVersion} · {d.inventory?.architecture} · {d.inventory?.memoryGB ? `${d.inventory.memoryGB} GB RAM` : ""}</p>}
       <div className="device-signals"><strong>Sinais coletados</strong>{Object.keys(d.signals || {}).length ? Object.entries(d.signals || {}).map(([kind, timestamp]) => <span key={kind}>{kind}: {date(timestamp)}</span>) : <span>Aguardando sinais do agente.</span>}</div>
+      <div className="device-software"><strong>Softwares instalados ({d.software?.length || 0})</strong>{d.software?.length ? <div>{d.software.slice(0, 30).map(item => <span key={item}>{item}</span>)}</div> : <p>Aguardando inventário do agente.</p>}</div>
       {canManage && (
         <div className="device-actions">
           <button
@@ -3671,6 +3673,7 @@ function Settings({ d, prefs }: { d: Data; prefs: Prefs }) {
       </article>
       <Policies d={d} />
       <ScheduleAdmin d={d} />
+      {(d.viewer.role === "super_admin" || d.viewer.role === "org_admin") && <ScimProvisioning d={d} />}
       <article className="card">
         <h2>Coleta</h2>
         <dl className="settings-list">
@@ -3707,6 +3710,11 @@ function Settings({ d, prefs }: { d: Data; prefs: Prefs }) {
       </article>
     </div>
   );
+}
+function ScimProvisioning({ d }: { d: Data }) {
+  const [token, setToken] = useState(""); const [busy, setBusy] = useState(false);
+  const create = async () => { setBusy(true); const r = await fetch("/platform-api/dashboard/scim/tokens", {method:"POST",headers:{"Content-Type":"application/json"},credentials:"same-origin",body:JSON.stringify({name:"Google / Microsoft Entra SCIM"})}); const x = await r.json().catch(()=>({})); setToken(x.token || ""); setBusy(false); };
+  return <article className="card"><div className="card-head"><div><h2>Provisionamento SCIM</h2><p>Sincronize pessoas de Google Workspace ou Microsoft Entra ID via padrão SCIM 2.0.</p></div><button className="primary" disabled={busy} onClick={create}>{busy ? "Gerando…" : "Gerar token SCIM"}</button></div><p className="settings-copy">Configure no seu IdP o endpoint <code>https://timewatcher.32-193-139-223.sslip.io/scim/v2</code>. Usuários criados ou desativados no IdP são refletidos no cadastro da organização.</p>{token && <div className="invite-link"><strong>Token SCIM — copie agora; ele não será mostrado novamente.</strong><code>{token}</code></div>}</article>;
 }
 function ScheduleAdmin({ d }: { d: Data }) {
   const [name, setName] = useState(""); const [start, setStart] = useState("09:00"); const [end, setEnd] = useState("18:00"); const [tz, setTz] = useState("America/Sao_Paulo"); const [holidays, setHolidays] = useState(""); const [shifts, setShifts] = useState(""); const [tolerance, setTolerance] = useState("0"); const [bankHours, setBankHours] = useState(false); const [approvalRequired, setApprovalRequired] = useState(true); const [saved, setSaved] = useState(false);

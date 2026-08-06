@@ -183,7 +183,8 @@ def sync_heartbeat(config: dict) -> bool:
     except Exception:
         pass
     memory = read(["/usr/sbin/sysctl", "-n", "hw.memsize"])
-    device = {"os": platform.system(), "osVersion": platform.mac_ver()[0] or platform.release(), "model": read(["/usr/sbin/sysctl", "-n", "hw.model"]), "architecture": platform.machine(), "memoryGB": str(round(int(memory) / (1024 ** 3), 1)) if memory.isdigit() else "", "localIp": local_ip, "sessionUser": getpass.getuser()}
+    apps = sorted({item.stem for root in (Path("/Applications"), Path.home() / "Applications") if root.exists() for item in root.glob("*.app")})[:300]
+    device = {"os": platform.system(), "osVersion": platform.mac_ver()[0] or platform.release(), "model": read(["/usr/sbin/sysctl", "-n", "hw.model"]), "architecture": platform.machine(), "memoryGB": str(round(int(memory) / (1024 ** 3), 1)) if memory.isdigit() else "", "localIp": local_ip, "sessionUser": getpass.getuser(), "sessionEmail": str(config.get("user_email", "")).strip().lower(), "installedSoftware": apps}
     return authenticated_json(
         config["server_url"].rstrip("/") + "/ingest/v1/activity-events",
         config["token"],

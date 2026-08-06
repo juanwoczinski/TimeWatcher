@@ -5,6 +5,7 @@
     <Property Id="SERVER_URL" Value="https://timewatcher.32-193-139-223.sslip.io" Secure="yes" />
     <Property Id="TENANT_ID" Secure="yes" />
     <Property Id="ENROLLMENT_TOKEN" Hidden="yes" Secure="yes" />
+    <Property Id="USER_EMAIL" Secure="yes" />
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="TimeWatcher">
         <Component Id="AgentFiles" Guid="A57E86E2-5C66-43F3-9811-17A4AD489342">
@@ -14,6 +15,7 @@
           <RegistryValue Root="HKLM" Key="Software\TimeWatcher" Name="ServerUrl" Type="string" Value="[SERVER_URL]" KeyPath="yes" />
           <RegistryValue Root="HKLM" Key="Software\TimeWatcher" Name="TenantId" Type="string" Value="[TENANT_ID]" />
           <RegistryValue Root="HKLM" Key="Software\TimeWatcher" Name="EnrollmentToken" Type="string" Value="[ENROLLMENT_TOKEN]" />
+          <RegistryValue Root="HKLM" Key="Software\TimeWatcher" Name="UserEmail" Type="string" Value="[USER_EMAIL]" />
           <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="TimeWatcher" Type="string" Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]TimeWatcherAgent.ps1&quot;" />
         </Component>
       </Directory>

@@ -72,6 +72,7 @@ def default_config() -> dict:
         "journeyAdjustments": [],
         "reportSchedules": [],
         "integrations": {},
+        "scimTokens": [],
         "agentReleases": {},
         "monthlyClosings": [],
     }
@@ -210,7 +211,7 @@ def billing_summary(config: dict, tenant_id: str) -> dict:
 
 def device_allowed(config: dict, tenant_id: str, hostname: str) -> bool:
     """Enforce a tenant device limit at ingestion time, not only in the UI."""
-    hostname = (hostname or "unknown")[:200]
+    hostname = canonical_host(hostname)
     known = {key.split(":", 1)[1] for key in (config.get("devices") or {}) if key.startswith(f"{tenant_id}:")}
     if hostname in known:
         return True
@@ -218,9 +219,38 @@ def device_allowed(config: dict, tenant_id: str, hostname: str) -> bool:
     return limit == 0 or len(known) < limit
 
 
+def canonical_host(value: str) -> str:
+    return str(value or "unknown").strip().casefold()[:200]
+
+
+def auto_link_device_identity(config: dict, tenant_id: str, hostname: str, inventory: dict) -> dict | None:
+    """Link telemetry to exactly one roster person; never guess ambiguous identities."""
+    host = canonical_host(hostname)
+    email = str(inventory.get("sessionEmail", "")).strip().lower()
+    user = re.sub(r"[^a-z0-9]", "", str(inventory.get("sessionUser", "")).lower())
+    people = [p for p in config.get("people", []) if p.get("tenantId") == tenant_id]
+    candidates = [p for p in people if email and (p.get("email") or "").lower() == email]
+    if not candidates and user:
+        candidates = [p for p in people if user in {
+            re.sub(r"[^a-z0-9]", "", (p.get("email") or "").split("@", 1)[0].lower()),
+            re.sub(r"[^a-z0-9]", "", str(p.get("name", "")).lower()),
+        }]
+    if len(candidates) != 1:
+        return None
+    person = candidates[0]
+    existing = canonical_host(person.get("host", "")) if person.get("host") else ""
+    if existing and existing != host:
+        return None
+    person["host"] = host
+    if email and not person.get("email"):
+        person["email"] = email
+    config.setdefault("devices", {}).setdefault(f"{tenant_id}:{host}", {})["personId"] = person["id"]
+    return person
+
+
 def register_device_signal(config: dict, tenant_id: str, hostname: str, client: str = "", version: str = "", inventory: dict | None = None, observed_ip: str = "") -> None:
     """Persist inventory at the first authenticated signal from an agent."""
-    hostname = (hostname or "unknown")[:200]
+    hostname = canonical_host(hostname)
     entry = config.setdefault("devices", {}).setdefault(f"{tenant_id}:{hostname}", {})
     entry["lastSignalAt"] = datetime.now(timezone.utc).isoformat()
     if client:
@@ -228,7 +258,9 @@ def register_device_signal(config: dict, tenant_id: str, hostname: str, client: 
     if version:
         entry["version"] = version[:80]
     if isinstance(inventory, dict):
-        entry["inventory"] = {key: str(value)[:160] for key, value in inventory.items() if key in ("os", "osVersion", "model", "architecture", "memoryGB", "localIp", "sessionUser") and value not in (None, "")}
+        entry["inventory"] = {key: str(value)[:160] for key, value in inventory.items() if key in ("os", "osVersion", "model", "architecture", "memoryGB", "localIp", "sessionUser", "sessionEmail") and value not in (None, "")}
+        if isinstance(inventory.get("installedSoftware"), list):
+            entry["software"] = sorted({str(item)[:120] for item in inventory["installedSoftware"] if str(item).strip()})[:300]
     if observed_ip and observed_ip not in ("local", "unknown"):
         entry["observedIp"] = observed_ip[:80]
 
@@ -637,7 +669,7 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     buckets = aw_get("/api/0/buckets/")
     def belongs(bucket_id: str) -> bool:
         return bucket_id.startswith(f"tw-{tenant_id}_") if tenant_id != "synova" else not bucket_id.startswith("tw-") or bucket_id.startswith("tw-synova_")
-    buckets = {key: value for key, value in buckets.items() if belongs(key)}
+    buckets = {key: {**value, "hostname": canonical_host(value.get("hostname", ""))} for key, value in buckets.items() if belongs(key)}
     removed_hosts = set((config.get("removedHosts") or {}).get(tenant_id, []))
     buckets = {key: value for key, value in buckets.items() if value.get("hostname") not in removed_hosts}
     assignable_hosts = telemetry_hosts(buckets)
@@ -765,8 +797,8 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
         age = (end - seen).total_seconds()
         return "online" if age < 300 else "stale" if age < 3600 else "offline"
     registry = config.get("devices") or {}
-    people_by_host = {person.get("host"): person for person in config.get("people", []) if person.get("tenantId") == tenant_id and person.get("host")}
-    devices = [{"id": host, "name": (registry.get(f"{tenant_id}:{host}") or {}).get("name") or host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop", "lastSeen": seen.isoformat(), "status": "online" if (end - seen).total_seconds() < 300 else "offline", "health": device_health(seen), "client": clients_by_host.get(host), "version": (registry.get(f"{tenant_id}:{host}") or {}).get("version") or clients_by_host.get(host), "updateRequested": bool((registry.get(f"{tenant_id}:{host}") or {}).get("updateRequested")), "assignedPersonId": (registry.get(f"{tenant_id}:{host}") or {}).get("personId"), "personName": (people_by_host.get(host) or {}).get("name"), "personEmail": (people_by_host.get(host) or {}).get("email"), "blocked": host in blocked_hosts, "inventory": (registry.get(f"{tenant_id}:{host}") or {}).get("inventory", {}), "observedIp": (registry.get(f"{tenant_id}:{host}") or {}).get("observedIp"), "trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "presses": presses, "clicks": clicks, "signals": {name: timestamp.isoformat() for name, timestamp in signals_by_host.get(host, {}).items()}} for host, seen in sorted(devices_by_host.items())]
+    people_by_host = {canonical_host(person.get("host")): person for person in config.get("people", []) if person.get("tenantId") == tenant_id and person.get("host")}
+    devices = [{"id": host, "name": (registry.get(f"{tenant_id}:{host}") or {}).get("name") or host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop", "lastSeen": seen.isoformat(), "status": "online" if (end - seen).total_seconds() < 300 else "offline", "health": device_health(seen), "client": clients_by_host.get(host), "version": (registry.get(f"{tenant_id}:{host}") or {}).get("version") or clients_by_host.get(host), "updateRequested": bool((registry.get(f"{tenant_id}:{host}") or {}).get("updateRequested")), "assignedPersonId": (registry.get(f"{tenant_id}:{host}") or {}).get("personId"), "personName": (people_by_host.get(host) or {}).get("name"), "personEmail": (people_by_host.get(host) or {}).get("email"), "blocked": host in blocked_hosts, "inventory": (registry.get(f"{tenant_id}:{host}") or {}).get("inventory", {}), "software": (registry.get(f"{tenant_id}:{host}") or {}).get("software", []), "observedIp": (registry.get(f"{tenant_id}:{host}") or {}).get("observedIp"), "trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "presses": presses, "clicks": clicks, "signals": {name: timestamp.isoformat() for name, timestamp in signals_by_host.get(host, {}).items()}} for host, seen in sorted(devices_by_host.items())]
     _managed = managed_team_ids(config, current_viewer.get("email", ""), tenant_id) if current_viewer["role"] == "manager" else None
     _member = member_person(config, current_viewer) if current_viewer["role"] in ("member", "employee") else None
     people = [person.copy() for person in config["people"] if person["tenantId"] == tenant_id and (_managed is None or person.get("teamId") in _managed) and (_member is None or person.get("id") == _member.get("id"))]
@@ -876,6 +908,24 @@ def host_removed(tenant_id: str, host: str) -> bool:
     return host in set((load_config().get("removedHosts") or {}).get(tenant_id, []))
 
 
+def reconcile_case_variant_host(tenant_id: str, raw_host: str) -> None:
+    """Recover a live host that used a legacy hostname casing from a stale removal."""
+    canonical = canonical_host(raw_host)
+    if raw_host == canonical:
+        return
+    with _CONFIG_LOCK:
+        config = load_config()
+        raw_key = f"{tenant_id}:{raw_host}"
+        if raw_key not in (config.get("devices") or {}):
+            return
+        removed = config.setdefault("removedHosts", {}).setdefault(tenant_id, [])
+        if canonical in removed:
+            config["removedHosts"][tenant_id] = [item for item in removed if item != canonical]
+            config.setdefault("blockedHosts", {})[tenant_id] = [item for item in config.get("blockedHosts", {}).get(tenant_id, []) if item != canonical]
+            save_config(config)
+            audit("device.case_migration", "system", {"tenant": tenant_id, "host": canonical})
+
+
 def people_directory(params: dict, current_viewer: dict) -> dict:
     """Real people directory: one monitored person per telemetry host, with
     per-person metrics merged with persistent metadata (name/team/schedule)."""
@@ -885,7 +935,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
     buckets = aw_get("/api/0/buckets/")
     def belongs(bucket_id: str) -> bool:
         return bucket_id.startswith(f"tw-{tenant_id}_") if tenant_id != "synova" else not bucket_id.startswith("tw-") or bucket_id.startswith("tw-synova_")
-    buckets = {key: value for key, value in buckets.items() if belongs(key) and value.get("hostname") not in set((config.get("removedHosts") or {}).get(tenant_id, []))}
+    buckets = {key: {**value, "hostname": canonical_host(value.get("hostname", ""))} for key, value in buckets.items() if belongs(key) and canonical_host(value.get("hostname", "")) not in set((config.get("removedHosts") or {}).get(tenant_id, []))}
 
     scope = params.get("scope", ["default"])[0]
     is_manager = current_viewer["role"] == "manager" and scope != "self"
@@ -913,7 +963,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
     meta_by_key: dict = {}
     for person in config.get("people", []):
         if person.get("tenantId") != tenant_id: continue
-        meta_by_key[person.get("host") or person.get("id")] = person
+        meta_by_key[canonical_host(person.get("host")) if person.get("host") else person.get("id")] = person
 
     people = []; used_person_ids: set = set()
     for host, slot in sorted(hosts.items()):
@@ -1495,8 +1545,59 @@ class Handler(BaseHTTPRequestHandler):
     def authorized_admin(self, current: dict) -> bool:
         return current["role"] in ("super_admin", "org_admin")
 
+    def scim_tenant(self) -> str | None:
+        header = self.headers.get("Authorization", "")
+        if not header.startswith("Bearer "): return None
+        digest = hashlib.sha256(header[7:].encode()).hexdigest()
+        for item in load_config().get("scimTokens", []):
+            if hmac.compare_digest(item.get("tokenHash", ""), digest) and item.get("enabled", True): return item.get("tenantId")
+        return None
+
+    def scim_user(self, tenant_id: str, payload: dict, external_id: str = "") -> dict:
+        email = str(payload.get("userName") or payload.get("emails", [{}])[0].get("value", "")).strip().lower()
+        if "@" not in email: raise ValueError("userName_email_required")
+        name_data = payload.get("name") if isinstance(payload.get("name"), dict) else {}
+        name = str(payload.get("displayName") or " ".join(filter(None, [name_data.get("givenName"), name_data.get("familyName")])) or email.split("@", 1)[0])[:120]
+        active = bool(payload.get("active", True))
+        config = load_config(); person = next((p for p in config.get("people", []) if p.get("tenantId") == tenant_id and (p.get("email") or "").lower() == email), None)
+        if not person:
+            person = {"id": str(uuid.uuid4()), "tenantId": tenant_id, "email": email}; config.setdefault("people", []).append(person)
+        person.update({"name": name, "title": str(payload.get("title", person.get("title", "Colaborador")))[:120], "scimExternalId": str(payload.get("externalId") or external_id or person.get("scimExternalId", ""))[:160], "scimActive": active})
+        account = config.setdefault("accounts", {}).get(email)
+        if account: account["name"] = name; account["status"] = "active" if active else "disabled"
+        save_config(config); audit("scim.user.upsert", "scim", {"tenant": tenant_id, "email": email, "active": active})
+        return {"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "id": person["id"], "externalId": person.get("scimExternalId"), "userName": email, "displayName": name, "active": active, "emails": [{"value": email, "primary": True}]}
+
+    def handle_scim(self, method: str, parsed, payload: dict | None = None) -> None:
+        tenant_id = self.scim_tenant()
+        if not tenant_id: return self.send_json(401, {"schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"], "status": "401", "detail": "invalid_token"})
+        path = parsed.path.rstrip("/")
+        if path.endswith("/ServiceProviderConfig"):
+            return self.send_json(200, {"schemas": ["urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"], "patch": {"supported": True}, "bulk": {"supported": False}, "filter": {"supported": True}, "changePassword": {"supported": False}, "sort": {"supported": False}, "etag": {"supported": False}})
+        if path.endswith("/Users") and method == "GET":
+            people = [p for p in load_config().get("people", []) if p.get("tenantId") == tenant_id and p.get("email")]
+            resources = [{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "id": p["id"], "externalId": p.get("scimExternalId"), "userName": p["email"], "displayName": p.get("name", ""), "active": p.get("scimActive", True), "emails": [{"value": p["email"], "primary": True}]} for p in people]
+            return self.send_json(200, {"schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], "totalResults": len(resources), "Resources": resources})
+        if path.endswith("/Users") and method == "POST":
+            try: return self.send_json(201, self.scim_user(tenant_id, payload or {}))
+            except ValueError as error: return self.send_json(400, {"detail": str(error)})
+        if "/Users/" in path and method in ("PUT", "PATCH"):
+            external_id = path.rsplit("/", 1)[-1]
+            body = payload or {}
+            if method == "PATCH":
+                current = next((p for p in load_config().get("people", []) if p.get("tenantId") == tenant_id and (p.get("id") == external_id or p.get("scimExternalId") == external_id)), None)
+                body = {"userName": (current or {}).get("email", ""), "displayName": (current or {}).get("name", ""), "active": (current or {}).get("scimActive", True), "externalId": external_id}
+                for operation in (payload or {}).get("Operations", []):
+                    field = str(operation.get("path", "")); value = operation.get("value")
+                    if field == "active": body["active"] = value
+                    elif field in ("displayName", "userName"): body[field] = value
+            try: return self.send_json(200, self.scim_user(tenant_id, body, external_id))
+            except ValueError as error: return self.send_json(400, {"detail": str(error)})
+        return self.send_json(404, {"detail": "not_found"})
+
     def do_GET(self) -> None:
         parsed = urllib.parse.urlsplit(self.path); params = urllib.parse.parse_qs(parsed.query); current = viewer(self.headers)
+        if parsed.path.startswith("/scim/v2/"): return self.handle_scim("GET", parsed)
         if parsed.path == "/health": return self.send_json(200, {"status": "ok", "version": 3})
         if parsed.path == "/auth/invite": return self.invite_info(params)
         if parsed.path == "/auth/reset-info": return self.reset_info(params)
@@ -1608,6 +1709,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlsplit(self.path); current = viewer(self.headers)
+        if parsed.path.startswith("/scim/v2/"):
+            try: payload = self.read_json()
+            except Exception: return self.send_json(400, {"detail": "invalid_json"})
+            return self.handle_scim("POST", parsed, payload)
         if parsed.path == "/auth/login": return self.do_login()
         if parsed.path == "/auth/logout": return self.do_logout()
         if parsed.path == "/auth/accept-invite": return self.do_accept_invite()
@@ -1692,6 +1797,11 @@ class Handler(BaseHTTPRequestHandler):
                     if "@" not in email or frequency not in ("daily", "weekly", "monthly"): return self.send_json(400, {"error": "invalid_schedule"})
                     entry = {"id": str(uuid.uuid4()), "tenantId": r_tenant, "email": email, "frequency": frequency, "period": str(payload.get("period", "7d"))[:20], "enabled": True, "createdAt": datetime.now(timezone.utc).isoformat(), "createdBy": current["email"], "lastSentAt": None, "delivery": "secure_link"}
                     config.setdefault("reportSchedules", []).append(entry); save_config(config); audit("report_schedule.create", current["email"], {"id": entry["id"], "tenantId": r_tenant, "email": email}); return self.send_json(201, entry)
+                if parsed.path == "/dashboard/scim/tokens":
+                    s_tenant = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
+                    token = secrets.token_urlsafe(32)
+                    entry = {"id": str(uuid.uuid4()), "tenantId": s_tenant, "name": str(payload.get("name", "SCIM provisionamento"))[:80], "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "createdAt": datetime.now(timezone.utc).isoformat(), "createdBy": current["email"], "enabled": True}
+                    config.setdefault("scimTokens", []).append(entry); save_config(config); audit("scim.token.create", current["email"], {"tenant": s_tenant, "id": entry["id"]}); return self.send_json(201, {"token": token, "endpoint": f"{PUBLIC_URL}/scim/v2", "id": entry["id"], "tenantId": s_tenant})
                 if parsed.path == "/dashboard/monthly-closing":
                     c_tenant = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
                     month = str(payload.get("month", ""))[:7]
@@ -1937,6 +2047,20 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/v1/activity-events": return self.receive_activity_events()
         return self.receive_screenshot()
 
+    def do_PUT(self) -> None:
+        parsed = urllib.parse.urlsplit(self.path)
+        if not parsed.path.startswith("/scim/v2/"): return self.send_json(404, {"error": "not_found"})
+        try: payload = self.read_json()
+        except Exception: return self.send_json(400, {"detail": "invalid_json"})
+        return self.handle_scim("PUT", parsed, payload)
+
+    def do_PATCH(self) -> None:
+        parsed = urllib.parse.urlsplit(self.path)
+        if not parsed.path.startswith("/scim/v2/"): return self.send_json(404, {"error": "not_found"})
+        try: payload = self.read_json()
+        except Exception: return self.send_json(400, {"detail": "invalid_json"})
+        return self.handle_scim("PATCH", parsed, payload)
+
     def list_screenshots(self, current: dict, tenant_id: str) -> None:
         metadata = {}
         try:
@@ -2173,7 +2297,7 @@ class Handler(BaseHTTPRequestHandler):
         if not 4 <= length <= MAX_UPLOAD_BYTES: return self.send_json(413, {"error": "invalid_size"})
         image = self.rfile.read(length)
         if len(image) != length or not image.startswith(b"\xff\xd8\xff"): return self.send_json(400, {"error": "invalid_jpeg"})
-        device = self.headers.get("X-Device-Id", "unknown")[:120]; captured_at = self.headers.get("X-Captured-At", datetime.now(timezone.utc).isoformat())[:80]; app = self.headers.get("X-Active-App", "")[:300]; title = self.headers.get("X-Active-Title", "")[:1000]
+        raw_device = self.headers.get("X-Device-Id", "unknown")[:120]; reconcile_case_variant_host(getattr(self, "ingest_tenant", "synova"), raw_device); device = canonical_host(raw_device); captured_at = self.headers.get("X-Captured-At", datetime.now(timezone.utc).isoformat())[:80]; app = self.headers.get("X-Active-App", "")[:300]; title = self.headers.get("X-Active-Title", "")[:1000]
         tenant_id = getattr(self, "ingest_tenant", "synova")
         if host_removed(tenant_id, device): return self.send_json(410, {"error": "device_removed"})
         if host_blocked(tenant_id, device): return self.send_json(403, {"error": "device_blocked"})
@@ -2195,7 +2319,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get_content_type() != "application/json": return self.send_json(415, {"error": "json_required"})
         try:
             payload = self.read_json(); bucket = payload["bucket"]; raw_bucket_id = str(bucket["id"])[:250].replace("/", "_"); tenant_id = getattr(self, "ingest_tenant", "synova"); bucket_id = raw_bucket_id if tenant_id == "synova" else f"tw-{tenant_id}_{raw_bucket_id}"; events = payload["events"]
-            hostname = str(bucket.get("hostname", "unknown"))[:200]
+            raw_hostname = str(bucket.get("hostname", "unknown"))[:200]; reconcile_case_variant_host(tenant_id, raw_hostname); hostname = canonical_host(raw_hostname)
+            bucket = {**bucket, "hostname": hostname}
             if host_removed(tenant_id, hostname): return self.send_json(410, {"error": "device_removed"})
             if host_blocked(tenant_id, hostname): return self.send_json(403, {"error": "device_blocked"})
             if not isinstance(events, list) or len(events) > 1000: raise ValueError()
@@ -2209,6 +2334,9 @@ class Handler(BaseHTTPRequestHandler):
                 version = str(signal.get("version", ""))
                 inventory = signal.get("device") if isinstance(signal.get("device"), dict) else {}
                 register_device_signal(config, tenant_id, hostname, str(bucket.get("client", "")), version, inventory, client_ip(self.headers))
+                linked = auto_link_device_identity(config, tenant_id, hostname, inventory)
+                if linked:
+                    audit("device.auto_link", "system", {"tenant": tenant_id, "host": hostname, "personId": linked["id"]})
                 save_config(config)
             aw_request("POST", f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}", {"id": bucket_id, "type": str(bucket.get("type", "unknown"))[:200], "client": str(bucket.get("client", "timewatcher"))[:200], "hostname": str(bucket.get("hostname", "unknown"))[:200], "data": dict(bucket.get("data", {}))})
             if clean: aw_request("POST", f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}/events", clean)
