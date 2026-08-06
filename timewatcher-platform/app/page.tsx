@@ -116,6 +116,13 @@ type Person = {
   idleSeconds: number;
   productiveSeconds: number;
   focusScore: number;
+  expectedSeconds?: number;
+  scheduleAdherence?: number;
+  productivityIndex?: number;
+  scheduledActiveSeconds?: number;
+  scheduledProductiveSeconds?: number;
+  outsideScheduleSeconds?: number;
+  scheduleName?: string | null;
 };
 type Data = {
   viewer: { username: string; name: string; role: Role; tenantId: string };
@@ -142,6 +149,12 @@ type Data = {
     urlCount: number;
     webSeconds: number;
     lastSeen: string | null;
+    expectedSeconds?: number;
+    scheduleAdherence?: number;
+    productivityIndex?: number;
+    scheduledActiveSeconds?: number;
+    scheduledProductiveSeconds?: number;
+    outsideScheduleSeconds?: number;
   };
   devices: Device[];
   apps: App[];
@@ -1619,6 +1632,18 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
               <div>
                 <dt>Produtivo</dt>
                 <dd>{duration(current.productiveSeconds)}</dd>
+              </div>
+              <div>
+                <dt>Jornada esperada</dt>
+                <dd>{duration(current.expectedSeconds || 0)}</dd>
+              </div>
+              <div>
+                <dt>Índice na jornada</dt>
+                <dd>{Math.round(current.productivityIndex || 0)}%</dd>
+              </div>
+              <div>
+                <dt>Aderência</dt>
+                <dd>{Math.round(current.scheduleAdherence || 0)}%</dd>
               </div>
             </dl>
           </div>

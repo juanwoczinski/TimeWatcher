@@ -448,6 +448,70 @@ def intervals_duration(intervals: list[tuple[datetime, datetime]]) -> float:
     return sum((interval_end - interval_start).total_seconds() for interval_start, interval_end in intervals)
 
 
+def schedule_windows(schedule: dict | None, start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+    """Return the measured portion of a person's configured jornada.
+
+    Windows are built in the product timezone and clipped to the requested
+    range/current time, so activity outside the assigned shift never inflates
+    the productivity denominator.
+    """
+    if not schedule:
+        return []
+    try:
+        sh, sm = (int(x) for x in str(schedule.get("start", "09:00")).split(":")[:2])
+        eh, em = (int(x) for x in str(schedule.get("end", "18:00")).split(":")[:2])
+        pause = max(0, int(schedule.get("breakMinutes", 0))) * 60
+    except (TypeError, ValueError):
+        return []
+    weekdays = {int(day) for day in (schedule.get("weekdays") or [1, 2, 3, 4, 5])}
+    local_start = start.astimezone(LOCAL_TIMEZONE).date()
+    local_end = end.astimezone(LOCAL_TIMEZONE).date()
+    windows = []
+    cursor = local_start
+    while cursor <= local_end:
+        if cursor.isoweekday() in weekdays:
+            ws = datetime(cursor.year, cursor.month, cursor.day, sh, sm, tzinfo=LOCAL_TIMEZONE)
+            we = datetime(cursor.year, cursor.month, cursor.day, eh, em, tzinfo=LOCAL_TIMEZONE)
+            if we <= ws:  # overnight shifts are supported without ambiguity
+                we += timedelta(days=1)
+            # Deduct the configured interval from the end; this keeps expected
+            # seconds correct without pretending the break was productive.
+            we -= timedelta(seconds=pause)
+            clipped = (max(start, ws.astimezone(timezone.utc)), min(end, we.astimezone(timezone.utc)))
+            if clipped[1] > clipped[0]:
+                windows.append(clipped)
+        cursor += timedelta(days=1)
+    return windows
+
+
+def schedule_metrics(schedule: dict | None, start: datetime, end: datetime, tracked: list[tuple[datetime, datetime]], active: list[tuple[datetime, datetime]], productive: list[tuple[datetime, datetime]]) -> dict:
+    planned = schedule_windows(schedule, start, end)
+    expected = intervals_duration(planned)
+    return {
+        "expectedSeconds": round(expected, 3),
+        "scheduledTrackedSeconds": round(intersection_duration(tracked, planned), 3),
+        "scheduledActiveSeconds": round(intersection_duration(active, planned), 3),
+        "scheduledProductiveSeconds": round(intersection_duration(productive, planned), 3),
+        "outsideScheduleSeconds": round(max(0.0, intervals_duration(tracked) - intersection_duration(tracked, planned)), 3),
+        "scheduleAdherence": round(min(100.0, intersection_duration(active, planned) / expected * 100) if expected else 0.0, 1),
+        "productivityIndex": round(min(100.0, intersection_duration(productive, planned) / expected * 100) if expected else 0.0, 1),
+    }
+
+
+def subtract_intervals(base: list[tuple[datetime, datetime]], masks: list[tuple[datetime, datetime]]) -> list[tuple[datetime, datetime]]:
+    result = []
+    for bs, be in base:
+        cursor = bs
+        for ms, me in masks:
+            if me <= cursor: continue
+            if ms >= be: break
+            if ms > cursor: result.append((cursor, min(ms, be)))
+            cursor = max(cursor, me)
+            if cursor >= be: break
+        if cursor < be: result.append((cursor, be))
+    return [(s, e) for s, e in result if e > s]
+
+
 def uncovered_duration(segment: tuple[datetime, datetime, dict], masks: list[tuple[datetime, datetime]]) -> float:
     segment_start, segment_end, _ = segment
     covered = 0.0
@@ -585,15 +649,22 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     score = round(productive / tracked_seconds * 100 if tracked_seconds else 0)
     screenshot_count = sum(1 for _ in (DATA_DIR / "screenshots").rglob("*.jpg"))
     person = people[0] if people else {"id": "unassigned", "name": "Sem colaborador", "role": "Colaborador", "scheduleId": None, "deviceIds": []}
+    schedule = next((s for s in config["schedules"] if s["id"] == person.get("scheduleId") and s.get("tenantId") == tenant_id), None)
+    tracked_intervals = merge_intervals(window_segments + web_segments)
+    idle_intervals = merge_intervals(idle_segments)
+    active_intervals = subtract_intervals(tracked_intervals, idle_intervals)
+    productive_segments = [seg for seg in web_segments if classify(urllib.parse.urlsplit(str(seg[2].get("url", ""))).hostname or str(seg[2].get("url", "")), rules) == "productive"]
+    productive_segments += [seg for seg in window_segments if classify(str(seg[2].get("app", "Não identificado")), rules) == "productive"]
+    journey = schedule_metrics(schedule, start, end, tracked_intervals, active_intervals, merge_intervals(productive_segments))
     person.update({"deviceCount": len(devices), "status": "online" if any(d["status"] == "online" for d in devices) else "offline", "trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "idleSeconds": round(idle_seconds, 3), "productiveSeconds": round(productive, 3), "focusScore": score})
-    schedule = next((s for s in config["schedules"] if s["id"] == person.get("scheduleId")), None)
+    person.update(journey)
     tenant = next((t for t in config["tenants"] if t["id"] == tenant_id), {"id": tenant_id, "name": tenant_id})
     recent.sort(key=lambda item: item.get("timestamp") or "", reverse=True)
     return {
         "viewer": current_viewer, "tenant": tenant, "tenants": config["tenants"] if current_viewer["role"] == "super_admin" else [tenant],
         "period": period, "range": {"start": start.isoformat(), "end": end.isoformat()}, "generatedAt": datetime.now(timezone.utc).isoformat(),
         "person": person, "people": people, "schedules": [s for s in config["schedules"] if s["tenantId"] == tenant_id], "schedule": schedule,
-        "summary": {"trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "idleSeconds": round(idle_seconds, 3), "productiveSeconds": round(productive, 3), "neutralSeconds": round(category_seconds["neutral"], 3), "unproductiveSeconds": round(category_seconds["unproductive"], 3), "focusScore": score, "deviceCount": len(devices), "onlineDeviceCount": sum(d["status"] == "online" for d in devices), "screenshotCount": screenshot_count, "urlCount": len(urls), "webSeconds": round(web_total, 3), "lastSeen": max(last_seen_values).isoformat() if last_seen_values else None},
+        "summary": {"trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "idleSeconds": round(idle_seconds, 3), "productiveSeconds": round(productive, 3), "neutralSeconds": round(category_seconds["neutral"], 3), "unproductiveSeconds": round(category_seconds["unproductive"], 3), "focusScore": score, "deviceCount": len(devices), "onlineDeviceCount": sum(d["status"] == "online" for d in devices), "screenshotCount": screenshot_count, "urlCount": len(urls), "webSeconds": round(web_total, 3), "lastSeen": max(last_seen_values).isoformat() if last_seen_values else None, **journey},
         "devices": devices, "apps": apps[:100], "urls": urls[:200], "domains": [{"domain": d, "seconds": round(s, 3), "duration": duration_label(s), "classification": classify(d, rules)} for d, s in sorted(domain_seconds.items(), key=lambda item: item[1], reverse=True)],
         "timeline": [{"hour": h, "label": f"{h:02d}h", "seconds": round(hourly[h], 3)} for h in range(24) if hourly[h] > 0], "recent": recent[:100], "input": {"presses": presses, "clicks": clicks},
     }
@@ -706,6 +777,10 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
         active = max(0.0, tracked - min(idle, tracked))
         pid = re.sub(r"[^a-z0-9-]", "-", host.lower()).strip("-") or "host"
         meta = meta_by_key.get(host) or meta_by_key.get(pid) or {}
+        schedule = next((s for s in config.get("schedules", []) if s.get("id") == meta.get("scheduleId") and s.get("tenantId") == tenant_id), None)
+        expected = intervals_duration(schedule_windows(schedule, start, end))
+        scheduled_active = min(active, expected) if expected else 0.0
+        scheduled_productive = min(productive, expected) if expected else 0.0
         # RBAC: a manager only sees people assigned to the teams they manage
         if is_manager and meta.get("teamId") not in managed:
             continue
@@ -728,6 +803,8 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
             "status": "online" if online else "offline", "lastSeen": last_seen.isoformat() if last_seen else None,
             "trackedSeconds": round(tracked, 3), "activeSeconds": round(active, 3), "idleSeconds": round(idle, 3),
             "productiveSeconds": round(productive, 3), "focusScore": round(productive / tracked * 100 if tracked else 0),
+            "expectedSeconds": round(expected, 3), "scheduledActiveSeconds": round(scheduled_active, 3), "scheduledProductiveSeconds": round(scheduled_productive, 3),
+            "scheduleAdherence": round(min(100.0, scheduled_active / expected * 100) if expected else 0.0, 1), "productivityIndex": round(min(100.0, scheduled_productive / expected * 100) if expected else 0.0, 1), "outsideScheduleSeconds": round(max(0.0, tracked - min(tracked, expected)) if expected else 0.0, 3), "scheduleName": schedule.get("name") if schedule else None,
             "presses": presses, "clicks": clicks,
             "topApps": [{"name": app, "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": classify(app, rules)} for app, seconds in top_apps],
             "topUrls": [{"url": url, "domain": urllib.parse.urlsplit(url).hostname or url, "title": page_titles.get(url, ""), "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": classify(urllib.parse.urlsplit(url).hostname or url, rules)} for url, seconds in top_urls],
@@ -746,6 +823,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
             "device": (host or "").replace(".local", "") or "—", "platform": "—",
             "status": "offline", "lastSeen": None,
             "trackedSeconds": 0, "activeSeconds": 0, "idleSeconds": 0, "productiveSeconds": 0, "focusScore": 0,
+            "expectedSeconds": round(intervals_duration(schedule_windows(next((s for s in config.get("schedules", []) if s.get("id") == person.get("scheduleId") and s.get("tenantId") == tenant_id), None), start, end)), 3), "scheduledActiveSeconds": 0, "scheduledProductiveSeconds": 0, "scheduleAdherence": 0, "productivityIndex": 0, "outsideScheduleSeconds": 0, "scheduleName": next((s.get("name") for s in config.get("schedules", []) if s.get("id") == person.get("scheduleId")), None),
             "presses": 0, "clicks": 0, "topApps": [], "topUrls": [], "recentActivity": [],
         })
     if current_viewer["role"] in ("member", "employee"):
@@ -1312,11 +1390,15 @@ class Handler(BaseHTTPRequestHandler):
                     if role in ("admin", "administrador", "org_admin"): role = "org_admin"
                     elif role in ("manager", "gestor"): role = "manager"
                     else: role = "member"
+                    # A tenant administrator can delegate workspace roles, but
+                    # never elevate someone to the Synova platform role.
+                    if current["role"] != "super_admin" and role == "super_admin":
+                        return self.send_json(403, {"error": "super_admin_required"})
                     if "@" not in email or len(email) > 200: return self.send_json(400, {"error": "invalid_email"})
                     if config["accounts"].get(email, {}).get("status") == "active": return self.send_json(409, {"error": "account_exists"})
                     inv_tenant = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
                     token = secrets.token_urlsafe(32); now = datetime.now(timezone.utc)
-                    invite = {"email": email, "role": role, "tenantId": inv_tenant, "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "createdAt": now.isoformat(), "expiresAt": (now + timedelta(days=7)).isoformat()}
+                    invite = {"email": email, "role": role, "tenantId": inv_tenant, "teamId": payload.get("teamId"), "scheduleId": payload.get("scheduleId"), "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "createdAt": now.isoformat(), "expiresAt": (now + timedelta(days=7)).isoformat()}
                     config["invites"] = [i for i in config["invites"] if i.get("email") != email] + [invite]; save_config(config)
                     audit("invite.create", current["email"], {"email": email, "role": role, "tenantId": inv_tenant})
                     host = self.headers.get("Host") or urllib.parse.urlsplit(PUBLIC_URL).netloc
@@ -1624,6 +1706,15 @@ class Handler(BaseHTTPRequestHandler):
                 config["invites"] = [i for i in config["invites"] if i.get("tokenHash") != match["tokenHash"]]; save_config(config)
                 return self.send_json(409, {"error": "account_exists"})
             config["accounts"][email] = {"name": email.split("@")[0].replace(".", " ").replace("_", " ").title(), "role": match["role"], "tenantId": match.get("tenantId", "synova"), "status": "active", "pw": hash_password(password)}
+            # Invitations are also the provisioning point for the monitored
+            # roster: the admin can assign OU and jornada before first login.
+            if not any((p.get("email") or "").lower() == email for p in config.get("people", [])):
+                config.setdefault("people", []).append({
+                    "id": re.sub(r"[^a-z0-9-]", "-", email.split("@", 1)[0].lower()).strip("-") or str(uuid.uuid4()),
+                    "tenantId": match.get("tenantId", "synova"), "name": config["accounts"][email]["name"],
+                    "email": email, "role": "Colaborador", "teamId": match.get("teamId"),
+                    "scheduleId": match.get("scheduleId"), "deviceIds": [],
+                })
             config["invites"] = [i for i in config["invites"] if i.get("tokenHash") != match["tokenHash"]]; save_config(config)
             audit("account.activate", email, {"role": match["role"], "tenantId": match.get("tenantId", "synova")})
             account = config["accounts"][email]
