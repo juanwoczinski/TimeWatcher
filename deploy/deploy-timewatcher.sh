@@ -8,6 +8,7 @@ SSH_KEY="${TIMEWATCHER_SSH_KEY:-/Users/juankleber/Documents/Codex/2026-07-18/ten
 RELEASE_ID="$(date -u +%Y%m%d%H%M%S)"
 REMOTE_STAGE="/tmp/timewatcher-release-$RELEASE_ID"
 UPLOAD_INSTALLERS="${TIMEWATCHER_UPLOAD_INSTALLERS:-0}"
+REBUILD_INSTALLERS="${TIMEWATCHER_REBUILD_INSTALLERS:-0}"
 MAC_AGENT_VERSION="0.4.0"
 MAC_AGENT_SHA=""
 
@@ -25,11 +26,13 @@ rsync -az --delete \
   --exclude '.git' --exclude 'node_modules' --exclude 'dist' --exclude '.wrangler' --exclude 'public/downloads' \
   -e "$RSYNC_SSH" "$PROJECT_DIR/timewatcher-platform/" "$REMOTE_HOST:$REMOTE_STAGE/platform/"
 if [[ "$UPLOAD_INSTALLERS" == "1" ]]; then
-  "$PROJECT_DIR/installers/macos/build-pkg.sh" >/dev/null
+  if [[ "$REBUILD_INSTALLERS" == "1" || ! -f "$PROJECT_DIR/timewatcher-platform/public/downloads/TimeWatcher-Agent-macOS.zip" ]]; then
+    "$PROJECT_DIR/installers/macos/build-pkg.sh" >/dev/null
+  fi
   MAC_AGENT_SHA="$(shasum -a 256 "$PROJECT_DIR/timewatcher-platform/public/downloads/TimeWatcher-Agent-macOS.zip" | awk '{print $1}')"
   # ZIP files are already compressed. Sending only the active individual
   # installer avoids re-uploading legacy PKG/MSI artifacts on every release.
-  rsync -a -e "$RSYNC_SSH" \
+  rsync -a --checksum --partial --timeout=120 --progress -e "$RSYNC_SSH" \
     "$PROJECT_DIR/timewatcher-platform/public/downloads/TimeWatcher-Agent-macOS.zip" \
     "$PROJECT_DIR/timewatcher-platform/public/downloads/TimeWatcher-Agent-macOS.zip.sha256" \
     "$REMOTE_HOST:$REMOTE_STAGE/downloads/"
@@ -40,6 +43,7 @@ scp -i "$SSH_KEY" \
   "$PROJECT_DIR/watchsynova-agent/server/store.py" \
   "$PROJECT_DIR/watchsynova-agent/server/watchsynova-ingest.service" \
   "$PROJECT_DIR/deploy/timewatcher-platform.service" \
+  "$PROJECT_DIR/deploy/publish-agent-release.sh" \
   "$PROJECT_DIR/deploy/watchsynova.caddy" \
   "$REMOTE_HOST:$REMOTE_STAGE/config/"
 
@@ -91,12 +95,8 @@ wait_url http://127.0.0.1:5610/health
 test "\$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:5610/dashboard/data?period=today')" = "401"
 wait_url http://127.0.0.1:3110/
 if [[ '$UPLOAD_INSTALLERS' == '1' ]]; then
-  set -a
-  source /etc/watchsynova/ingest.env
-  set +a
-  curl --fail --silent --show-error -X POST http://127.0.0.1:5610/internal/agent-release \
-    -H "Authorization: Bearer $WATCHSYNOVA_INGEST_TOKEN" -H 'Content-Type: application/json' \
-    --data '{"platform":"macos","version":"$MAC_AGENT_VERSION","url":"https://timewatcher.32-193-139-223.sslip.io/downloads/TimeWatcher-Agent-macOS.zip","sha256":"$MAC_AGENT_SHA"}' >/dev/null
+  sudo bash '$REMOTE_STAGE/config/publish-agent-release.sh' macos '$MAC_AGENT_VERSION' \
+    'https://timewatcher.32-193-139-223.sslip.io/downloads/TimeWatcher-Agent-macOS.zip' '$MAC_AGENT_SHA'
 fi
 rm -rf '$REMOTE_STAGE'
 REMOTE
