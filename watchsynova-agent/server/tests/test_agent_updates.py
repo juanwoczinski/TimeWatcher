@@ -8,6 +8,10 @@ import ingest_server as server
 
 
 class AgentUpdateTests(unittest.TestCase):
+    def test_platform_is_derived_from_inventory_not_hostname_casing(self):
+        self.assertEqual(server.agent_platform("Darwin"), "macos")
+        self.assertEqual(server.agent_platform("Windows"), "windows")
+
     def release_config(self):
         config = server.default_config()
         config["agentReleases"]["macos"] = {
