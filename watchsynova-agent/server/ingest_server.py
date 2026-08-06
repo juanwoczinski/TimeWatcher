@@ -66,6 +66,8 @@ def default_config() -> dict:
         "billing": {},
         "pricing": {},
         "blockedHosts": {},
+        "devices": {},
+        "onboarding": {},
     }
 
 
@@ -648,7 +650,8 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     def device_health(seen: datetime) -> str:
         age = (end - seen).total_seconds()
         return "online" if age < 300 else "stale" if age < 3600 else "offline"
-    devices = [{"id": host, "name": host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop", "lastSeen": seen.isoformat(), "status": "online" if (end - seen).total_seconds() < 300 else "offline", "health": device_health(seen), "client": clients_by_host.get(host), "blocked": host in blocked_hosts, "trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "presses": presses, "clicks": clicks, "signals": {name: timestamp.isoformat() for name, timestamp in signals_by_host.get(host, {}).items()}} for host, seen in sorted(devices_by_host.items())]
+    registry = config.get("devices") or {}
+    devices = [{"id": host, "name": (registry.get(f"{tenant_id}:{host}") or {}).get("name") or host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop", "lastSeen": seen.isoformat(), "status": "online" if (end - seen).total_seconds() < 300 else "offline", "health": device_health(seen), "client": clients_by_host.get(host), "version": (registry.get(f"{tenant_id}:{host}") or {}).get("version") or clients_by_host.get(host), "updateRequested": bool((registry.get(f"{tenant_id}:{host}") or {}).get("updateRequested")), "assignedPersonId": (registry.get(f"{tenant_id}:{host}") or {}).get("personId"), "blocked": host in blocked_hosts, "trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "presses": presses, "clicks": clicks, "signals": {name: timestamp.isoformat() for name, timestamp in signals_by_host.get(host, {}).items()}} for host, seen in sorted(devices_by_host.items())]
     _managed = managed_team_ids(config, current_viewer.get("email", ""), tenant_id) if current_viewer["role"] == "manager" else None
     _member = member_person(config, current_viewer) if current_viewer["role"] in ("member", "employee") else None
     people = [person.copy() for person in config["people"] if person["tenantId"] == tenant_id and (_managed is None or person.get("teamId") in _managed) and (_member is None or person.get("id") == _member.get("id"))]
@@ -1325,6 +1328,12 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/dashboard/schedules":
             config = load_config(); tid = params.get("tenant", [current["tenantId"]])[0] if current["role"] == "super_admin" else current["tenantId"]
             return self.send_json(200, {"schedules": [s for s in config.get("schedules", []) if s.get("tenantId") == tid], "holidays": sorted({h for s in config.get("schedules", []) if s.get("tenantId") == tid for h in (s.get("holidays") or [])})})
+        if parsed.path == "/dashboard/onboarding":
+            if current["role"] not in ("super_admin", "org_admin"): return self.send_json(403, {"error": "forbidden"})
+            config = load_config(); tid = params.get("tenant", [current["tenantId"]])[0] if current["role"] == "super_admin" else current["tenantId"]
+            state = config.setdefault("onboarding", {}).get(tid, {})
+            people = [p for p in config.get("people", []) if p.get("tenantId") == tid]
+            return self.send_json(200, {"tenantId": tid, "steps": {"company": True, "schedule": any(s.get("tenantId") == tid for s in config.get("schedules", [])), "users": bool(people), "installer": bool(config.get("enrollments")), "device": any(p.get("tenantId") == tid and p.get("host") for p in people)}, "state": state})
         if parsed.path == "/dashboard/operations":
             if current["role"] not in ("super_admin", "org_admin", "manager"): return self.send_json(403, {"error": "forbidden"})
             config = load_config(); tid = current["tenantId"]
@@ -1599,6 +1608,19 @@ class Handler(BaseHTTPRequestHandler):
                         config["blockedHosts"][dev_tenant] = [h for h in blocked if h != host]
                     save_config(config); audit("device.block" if is_block else "device.unblock", current["email"], {"host": host})
                     return self.send_json(200, {"host": host, "blocked": is_block})
+                if parsed.path == "/dashboard/devices/update":
+                    host = str(payload.get("host", "")).strip(); if_not = not host
+                    if if_not: return self.send_json(400, {"error": "host_required"})
+                    tid = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
+                    key = f"{tid}:{host}"; registry = config.setdefault("devices", {}); entry = registry.setdefault(key, {})
+                    if "name" in payload: entry["name"] = str(payload.get("name") or host)[:120]
+                    if "personId" in payload:
+                        person = next((p for p in config.get("people", []) if p.get("id") == payload.get("personId") and p.get("tenantId") == tid), None)
+                        if not person: return self.send_json(404, {"error": "person_not_found"})
+                        entry["personId"] = person["id"]; person["host"] = host
+                    if payload.get("revoke"): config.setdefault("blockedHosts", {}).setdefault(tid, []); config["blockedHosts"][tid] = list(set(config["blockedHosts"][tid] + [host]))
+                    if payload.get("requestUpdate"): entry["updateRequested"] = True; entry["requestedAt"] = datetime.now(timezone.utc).isoformat()
+                    save_config(config); audit("device.update", current["email"], {"tenant": tid, "host": host, "personId": entry.get("personId"), "updateRequested": bool(payload.get("requestUpdate"))}); return self.send_json(200, {"host": host, **entry})
                 if parsed.path == "/dashboard/tenants":
                     if current["role"] != "super_admin": return self.send_json(403, {"error": "super_admin_required"})
                     tenant = {"id": re.sub(r"[^a-z0-9-]", "-", str(payload.get("id") or payload.get("name", "empresa")).lower()).strip("-"), "name": str(payload.get("name", "Empresa"))[:100], "kind": "customer", "status": "active", "peopleCount": 0, "deviceCount": 0}; config["tenants"].append(tenant); save_config(config); audit("tenant.create", current["email"], {"id": tenant["id"]}); return self.send_json(201, tenant)

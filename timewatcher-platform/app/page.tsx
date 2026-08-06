@@ -87,6 +87,9 @@ type Device = {
   activeSeconds: number;
   presses: number;
   clicks: number;
+  version?: string | null;
+  updateRequested?: boolean;
+  assignedPersonId?: string | null;
 };
 type Schedule = {
   id: string;
@@ -2825,13 +2828,15 @@ function DeviceCard({
   onToggleBlock: () => void;
 }) {
   const health = d.blocked ? "offline" : d.health || d.status;
+  const [name, setName] = useState(d.name);
+  async function update(patch: object) { await fetch("/platform-api/dashboard/devices/update", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify({ host: d.id, ...patch }) }); }
   return (
     <article className={`device-card${d.blocked ? " blocked" : ""}`}>
       <div className="device-icon">⌘</div>
       <div>
         <h3>{d.name}</h3>
         <p>
-          {d.platform} · {d.client || "agente"} · {d.id}
+          {d.platform} · {d.client || "agente"} · versão {d.version || "desconhecida"} · {d.id}
         </p>
       </div>
       <span className={`pill ${d.blocked ? "offline" : health === "online" ? "online" : "offline"}`}>
@@ -2868,6 +2873,7 @@ function DeviceCard({
                 ? "Reativar acesso"
                 : "Revogar acesso"}
           </button>
+          <div className="device-inline-edit"><input value={name} onChange={e => setName(e.target.value)} /><button className="btn ghost" onClick={() => update({ name })}>Renomear</button><button className="btn ghost" onClick={() => update({ requestUpdate: true })}>{d.updateRequested ? "Atualização solicitada" : "Solicitar atualização"}</button></div>
         </div>
       )}
     </article>
