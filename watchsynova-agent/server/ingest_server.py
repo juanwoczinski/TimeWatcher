@@ -69,6 +69,10 @@ def default_config() -> dict:
         "devices": {},
         "onboarding": {},
         "journeyAdjustments": [],
+        "reportSchedules": [],
+        "integrations": {},
+        "agentReleases": {},
+        "monthlyClosings": [],
     }
 
 
@@ -201,6 +205,42 @@ def billing_summary(config: dict, tenant_id: str) -> dict:
             {"id": "intelligence", "name": "Intelligence", "price": prices["intelligence"], "features": ["Tudo do Essential", "Entra na análise de IA", "Perguntas em linguagem natural", "Resumos e recomendações"]},
         ],
     }
+
+
+def device_allowed(config: dict, tenant_id: str, hostname: str) -> bool:
+    """Enforce a tenant device limit at ingestion time, not only in the UI."""
+    hostname = (hostname or "unknown")[:200]
+    known = {key.split(":", 1)[1] for key in (config.get("devices") or {}) if key.startswith(f"{tenant_id}:")}
+    if hostname in known:
+        return True
+    limit = int((billing_summary(config, tenant_id).get("limits") or {}).get("devices", 0) or 0)
+    return limit == 0 or len(known) < limit
+
+
+def register_device_signal(config: dict, tenant_id: str, hostname: str, client: str = "", version: str = "") -> None:
+    """Persist inventory at the first authenticated signal from an agent."""
+    hostname = (hostname or "unknown")[:200]
+    entry = config.setdefault("devices", {}).setdefault(f"{tenant_id}:{hostname}", {})
+    entry["lastSignalAt"] = datetime.now(timezone.utc).isoformat()
+    if client:
+        entry["client"] = client[:200]
+    if version:
+        entry["version"] = version[:80]
+
+
+def readiness_snapshot(config: dict, tenant_id: str) -> dict:
+    """Operational readiness based on persisted evidence, never static mock data."""
+    people = [p for p in config.get("people", []) if p.get("tenantId") == tenant_id]
+    accounts = [a for a in config.get("accounts", {}).values() if a.get("tenantId") == tenant_id and a.get("status") == "active"]
+    linked = sum(1 for p in people if p.get("host") and p.get("email") and any((p.get("email") or "").lower() == e.lower() for e, a in config.get("accounts", {}).items() if a.get("status") == "active"))
+    devices = [v for key, v in (config.get("devices") or {}).items() if key.startswith(f"{tenant_id}:")]
+    release = (config.get("agentReleases") or {}).get("macos") or {}
+    return {"checks": [
+        {"id": "identity", "label": "Conta, colaborador e host vinculados", "ok": bool(linked), "detail": f"{linked} vínculo(s) completo(s) de {len(people)} pessoa(s)"},
+        {"id": "agent", "label": "Agentes com heartbeat", "ok": bool(devices), "detail": f"{len(devices)} dispositivo(s) conhecido(s)"},
+        {"id": "release", "label": "Release do agente publicada", "ok": bool(release.get("version") and release.get("url")), "detail": release.get("version") or "Nenhuma release cadastrada"},
+        {"id": "access", "label": "Contas ativas", "ok": bool(accounts), "detail": f"{len(accounts)} conta(s) ativa(s)"},
+    ], "linkedPeople": linked, "people": len(people), "devices": len(devices)}
 
 
 _CONFIG_LOCK = threading.Lock()
@@ -1423,7 +1463,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 for line in AUDIT_FILE.read_text(encoding="utf-8").splitlines()[-100:]: recent.append(json.loads(line))
             except (OSError, json.JSONDecodeError): pass
-            return self.send_json(200, {"generatedAt": datetime.now(timezone.utc).isoformat(), "ingest": {"buckets": len(tenant_buckets), "hosts": len({b.get('hostname') for b in tenant_buckets}), "lastEvent": max((b.get('last_updated') or b.get('created') or '' for b in tenant_buckets), default=None)}, "alerts": compute_alerts(current), "audit": list(reversed(recent[-50:])), "services": {"ingest": "online", "activityStore": "online", "dashboard": "online"}})
+            return self.send_json(200, {"generatedAt": datetime.now(timezone.utc).isoformat(), "ingest": {"buckets": len(tenant_buckets), "hosts": len({b.get('hostname') for b in tenant_buckets}), "lastEvent": max((b.get('last_updated') or b.get('created') or '' for b in tenant_buckets), default=None)}, "alerts": compute_alerts(current), "audit": list(reversed(recent[-50:])), "services": {"ingest": "online", "activityStore": "online", "dashboard": "online"}, "readiness": readiness_snapshot(config, tid)})
         if parsed.path == "/dashboard/audit":
             if current["role"] != "super_admin": return self.send_json(403, {"error": "forbidden"})
             return self.list_audit()
@@ -1719,6 +1759,14 @@ class Handler(BaseHTTPRequestHandler):
                     if payload.get("revoke"): config.setdefault("blockedHosts", {}).setdefault(tid, []); config["blockedHosts"][tid] = list(set(config["blockedHosts"][tid] + [host]))
                     if payload.get("requestUpdate"): entry["updateRequested"] = True; entry["requestedAt"] = datetime.now(timezone.utc).isoformat()
                     save_config(config); audit("device.update", current["email"], {"tenant": tid, "host": host, "personId": entry.get("personId"), "updateRequested": bool(payload.get("requestUpdate"))}); return self.send_json(200, {"host": host, **entry})
+                if parsed.path == "/dashboard/agent-releases":
+                    if current["role"] != "super_admin": return self.send_json(403, {"error": "super_admin_required"})
+                    platform_name = str(payload.get("platform", "macos")).lower()
+                    if platform_name not in ("macos", "windows"): return self.send_json(400, {"error": "invalid_platform"})
+                    version = str(payload.get("version", "")).strip()[:80]; url = str(payload.get("url", "")).strip()[:1000]; sha = str(payload.get("sha256", "")).strip().lower()
+                    if not version or not url.startswith("https://") or (sha and not re.fullmatch(r"[a-f0-9]{64}", sha)): return self.send_json(400, {"error": "invalid_release"})
+                    release = {"version": version, "url": url, "sha256": sha, "publishedAt": datetime.now(timezone.utc).isoformat(), "publishedBy": current["email"]}
+                    config.setdefault("agentReleases", {})[platform_name] = release; save_config(config); audit("agent.release.publish", current["email"], {"platform": platform_name, "version": version}); return self.send_json(201, release)
                 if parsed.path == "/dashboard/tenants":
                     if current["role"] != "super_admin": return self.send_json(403, {"error": "super_admin_required"})
                     tenant = {"id": re.sub(r"[^a-z0-9-]", "-", str(payload.get("id") or payload.get("name", "empresa")).lower()).strip("-"), "name": str(payload.get("name", "Empresa"))[:100], "kind": "customer", "status": "active", "peopleCount": 0, "deviceCount": 0}; config["tenants"].append(tenant); save_config(config); audit("tenant.create", current["email"], {"id": tenant["id"]}); return self.send_json(201, tenant)
@@ -1971,7 +2019,13 @@ class Handler(BaseHTTPRequestHandler):
         image = self.rfile.read(length)
         if len(image) != length or not image.startswith(b"\xff\xd8\xff"): return self.send_json(400, {"error": "invalid_jpeg"})
         device = self.headers.get("X-Device-Id", "unknown")[:120]; captured_at = self.headers.get("X-Captured-At", datetime.now(timezone.utc).isoformat())[:80]; app = self.headers.get("X-Active-App", "")[:300]; title = self.headers.get("X-Active-Title", "")[:1000]
-        if host_blocked(getattr(self, "ingest_tenant", "synova"), device): return self.send_json(403, {"error": "device_blocked"})
+        tenant_id = getattr(self, "ingest_tenant", "synova")
+        if host_blocked(tenant_id, device): return self.send_json(403, {"error": "device_blocked"})
+        with _CONFIG_LOCK:
+            config = load_config()
+            if not device_allowed(config, tenant_id, device): return self.send_json(403, {"error": "device_limit_reached"})
+            register_device_signal(config, tenant_id, device, "timewatcher-agent")
+            save_config(config)
         target_dir = DATA_DIR / "screenshots" / getattr(self, "ingest_tenant", "synova") / datetime.now(timezone.utc).strftime("%Y-%m-%d"); target_dir.mkdir(parents=True, exist_ok=True); image_id = str(uuid.uuid4()); target = target_dir / f"{image_id}.jpg"
         with tempfile.NamedTemporaryFile(dir=target_dir, delete=False) as temporary: temporary.write(image); temporary.flush(); os.fsync(temporary.fileno()); temporary_path = Path(temporary.name)
         temporary_path.chmod(0o600); temporary_path.replace(target); digest = hashlib.sha256(image).hexdigest(); bucket_id = f"timewatcher-screenshot_{device}".replace("/", "_")
@@ -1985,19 +2039,27 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get_content_type() != "application/json": return self.send_json(415, {"error": "json_required"})
         try:
             payload = self.read_json(); bucket = payload["bucket"]; raw_bucket_id = str(bucket["id"])[:250].replace("/", "_"); tenant_id = getattr(self, "ingest_tenant", "synova"); bucket_id = raw_bucket_id if tenant_id == "synova" else f"tw-{tenant_id}_{raw_bucket_id}"; events = payload["events"]
-            if host_blocked(tenant_id, str(bucket.get("hostname", "unknown"))[:200]): return self.send_json(403, {"error": "device_blocked"})
+            hostname = str(bucket.get("hostname", "unknown"))[:200]
+            if host_blocked(tenant_id, hostname): return self.send_json(403, {"error": "device_blocked"})
             if not isinstance(events, list) or len(events) > 1000: raise ValueError()
             clean = [{"timestamp": str(e["timestamp"]), "duration": float(e.get("duration", 0)), "data": dict(e.get("data", {}))} for e in events]
+            # The first signal is the enrollment point.  Enforce the contracted
+            # device capacity server-side before persisting any telemetry.
+            with _CONFIG_LOCK:
+                config = load_config()
+                if not device_allowed(config, tenant_id, hostname): return self.send_json(403, {"error": "device_limit_reached"})
+                version = next((str(e.get("data", {}).get("version", "")) for e in reversed(clean) if e.get("data", {}).get("version")), "")
+                register_device_signal(config, tenant_id, hostname, str(bucket.get("client", "")), version)
+                save_config(config)
             aw_request("POST", f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}", {"id": bucket_id, "type": str(bucket.get("type", "unknown"))[:200], "client": str(bucket.get("client", "timewatcher"))[:200], "hostname": str(bucket.get("hostname", "unknown"))[:200], "data": dict(bucket.get("data", {}))})
             if clean: aw_request("POST", f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}/events", clean)
             if str(bucket.get("type")) == "timewatcher.heartbeat":
-                hostname = str(bucket.get("hostname", "unknown"))[:200]
                 version = next((str(e.get("data", {}).get("version", "")) for e in reversed(clean) if e.get("data", {}).get("version")), "")
-                if version:
-                    with _CONFIG_LOCK:
-                        config = load_config(); entry = config.setdefault("devices", {}).setdefault(f"{tenant_id}:{hostname}", {})
-                        entry["version"] = version; entry["lastHeartbeatAt"] = datetime.now(timezone.utc).isoformat(); entry["updateRequested"] = False
-                        save_config(config)
+                with _CONFIG_LOCK:
+                    config = load_config()
+                    entry = config.setdefault("devices", {}).setdefault(f"{tenant_id}:{hostname}", {})
+                    entry["lastHeartbeatAt"] = datetime.now(timezone.utc).isoformat(); entry["updateRequested"] = False
+                    save_config(config)
             with _CACHE_LOCK: _AW_CACHE.clear()
         except (KeyError, TypeError, ValueError, json.JSONDecodeError): return self.send_json(400, {"error": "invalid_payload"})
         except Exception: return self.send_json(502, {"error": "activity_write_failed"})
