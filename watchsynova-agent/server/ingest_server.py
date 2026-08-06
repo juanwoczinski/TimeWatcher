@@ -66,6 +66,7 @@ def default_config() -> dict:
         "billing": {},
         "pricing": {},
         "blockedHosts": {},
+        "removedHosts": {},
         "devices": {},
         "onboarding": {},
         "journeyAdjustments": [],
@@ -217,7 +218,7 @@ def device_allowed(config: dict, tenant_id: str, hostname: str) -> bool:
     return limit == 0 or len(known) < limit
 
 
-def register_device_signal(config: dict, tenant_id: str, hostname: str, client: str = "", version: str = "") -> None:
+def register_device_signal(config: dict, tenant_id: str, hostname: str, client: str = "", version: str = "", inventory: dict | None = None, observed_ip: str = "") -> None:
     """Persist inventory at the first authenticated signal from an agent."""
     hostname = (hostname or "unknown")[:200]
     entry = config.setdefault("devices", {}).setdefault(f"{tenant_id}:{hostname}", {})
@@ -226,6 +227,10 @@ def register_device_signal(config: dict, tenant_id: str, hostname: str, client: 
         entry["client"] = client[:200]
     if version:
         entry["version"] = version[:80]
+    if isinstance(inventory, dict):
+        entry["inventory"] = {key: str(value)[:160] for key, value in inventory.items() if key in ("os", "osVersion", "model", "architecture", "memoryGB", "localIp") and value not in (None, "")}
+    if observed_ip and observed_ip not in ("local", "unknown"):
+        entry["observedIp"] = observed_ip[:80]
 
 
 def readiness_snapshot(config: dict, tenant_id: str) -> dict:
@@ -633,6 +638,8 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     def belongs(bucket_id: str) -> bool:
         return bucket_id.startswith(f"tw-{tenant_id}_") if tenant_id != "synova" else not bucket_id.startswith("tw-") or bucket_id.startswith("tw-synova_")
     buckets = {key: value for key, value in buckets.items() if belongs(key)}
+    removed_hosts = set((config.get("removedHosts") or {}).get(tenant_id, []))
+    buckets = {key: value for key, value in buckets.items() if value.get("hostname") not in removed_hosts}
     assignable_hosts = telemetry_hosts(buckets)
     mine = member_person(config, current_viewer)
     my_host = mine.get("host") if mine else None
@@ -758,7 +765,7 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
         age = (end - seen).total_seconds()
         return "online" if age < 300 else "stale" if age < 3600 else "offline"
     registry = config.get("devices") or {}
-    devices = [{"id": host, "name": (registry.get(f"{tenant_id}:{host}") or {}).get("name") or host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop", "lastSeen": seen.isoformat(), "status": "online" if (end - seen).total_seconds() < 300 else "offline", "health": device_health(seen), "client": clients_by_host.get(host), "version": (registry.get(f"{tenant_id}:{host}") or {}).get("version") or clients_by_host.get(host), "updateRequested": bool((registry.get(f"{tenant_id}:{host}") or {}).get("updateRequested")), "assignedPersonId": (registry.get(f"{tenant_id}:{host}") or {}).get("personId"), "blocked": host in blocked_hosts, "trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "presses": presses, "clicks": clicks, "signals": {name: timestamp.isoformat() for name, timestamp in signals_by_host.get(host, {}).items()}} for host, seen in sorted(devices_by_host.items())]
+    devices = [{"id": host, "name": (registry.get(f"{tenant_id}:{host}") or {}).get("name") or host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop", "lastSeen": seen.isoformat(), "status": "online" if (end - seen).total_seconds() < 300 else "offline", "health": device_health(seen), "client": clients_by_host.get(host), "version": (registry.get(f"{tenant_id}:{host}") or {}).get("version") or clients_by_host.get(host), "updateRequested": bool((registry.get(f"{tenant_id}:{host}") or {}).get("updateRequested")), "assignedPersonId": (registry.get(f"{tenant_id}:{host}") or {}).get("personId"), "blocked": host in blocked_hosts, "inventory": (registry.get(f"{tenant_id}:{host}") or {}).get("inventory", {}), "observedIp": (registry.get(f"{tenant_id}:{host}") or {}).get("observedIp"), "trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "presses": presses, "clicks": clicks, "signals": {name: timestamp.isoformat() for name, timestamp in signals_by_host.get(host, {}).items()}} for host, seen in sorted(devices_by_host.items())]
     _managed = managed_team_ids(config, current_viewer.get("email", ""), tenant_id) if current_viewer["role"] == "manager" else None
     _member = member_person(config, current_viewer) if current_viewer["role"] in ("member", "employee") else None
     people = [person.copy() for person in config["people"] if person["tenantId"] == tenant_id and (_managed is None or person.get("teamId") in _managed) and (_member is None or person.get("id") == _member.get("id"))]
@@ -862,6 +869,10 @@ def resolved_schedule(config: dict, person: dict, tenant_id: str) -> dict | None
 
 def host_blocked(tenant_id: str, host: str) -> bool:
     return host in set((load_config().get("blockedHosts") or {}).get(tenant_id, []))
+
+
+def host_removed(tenant_id: str, host: str) -> bool:
+    return host in set((load_config().get("removedHosts") or {}).get(tenant_id, []))
 
 
 def people_directory(params: dict, current_viewer: dict) -> dict:
@@ -1882,6 +1893,23 @@ class Handler(BaseHTTPRequestHandler):
                     if payload.get("revoke"): config.setdefault("blockedHosts", {}).setdefault(tid, []); config["blockedHosts"][tid] = list(set(config["blockedHosts"][tid] + [host]))
                     if payload.get("requestUpdate"): entry["updateRequested"] = True; entry["requestedAt"] = datetime.now(timezone.utc).isoformat()
                     save_config(config); audit("device.update", current["email"], {"tenant": tid, "host": host, "personId": entry.get("personId"), "updateRequested": bool(payload.get("requestUpdate"))}); return self.send_json(200, {"host": host, **entry})
+                if parsed.path == "/dashboard/devices/delete":
+                    host = str(payload.get("host", "")).strip()
+                    if not host: return self.send_json(400, {"error": "host_required"})
+                    tid = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
+                    config.setdefault("removedHosts", {}).setdefault(tid, [])
+                    if host not in config["removedHosts"][tid]: config["removedHosts"][tid].append(host)
+                    config.setdefault("blockedHosts", {}).setdefault(tid, [])
+                    if host not in config["blockedHosts"][tid]: config["blockedHosts"][tid].append(host)
+                    config.setdefault("devices", {}).pop(f"{tid}:{host}", None)
+                    for person in config.get("people", []):
+                        if person.get("tenantId") == tid and person.get("host") == host:
+                            person.pop("host", None)
+                            person["deviceIds"] = [device for device in person.get("deviceIds", []) if device != host]
+                    save_config(config)
+                    with _CACHE_LOCK: _AW_CACHE.clear()
+                    audit("device.delete", current["email"], {"tenant": tid, "host": host})
+                    return self.send_json(200, {"host": host, "removed": True})
                 if parsed.path == "/dashboard/agent-releases":
                     if current["role"] != "super_admin": return self.send_json(403, {"error": "super_admin_required"})
                     platform_name = str(payload.get("platform", "macos")).lower()
@@ -2143,6 +2171,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(image) != length or not image.startswith(b"\xff\xd8\xff"): return self.send_json(400, {"error": "invalid_jpeg"})
         device = self.headers.get("X-Device-Id", "unknown")[:120]; captured_at = self.headers.get("X-Captured-At", datetime.now(timezone.utc).isoformat())[:80]; app = self.headers.get("X-Active-App", "")[:300]; title = self.headers.get("X-Active-Title", "")[:1000]
         tenant_id = getattr(self, "ingest_tenant", "synova")
+        if host_removed(tenant_id, device): return self.send_json(410, {"error": "device_removed"})
         if host_blocked(tenant_id, device): return self.send_json(403, {"error": "device_blocked"})
         with _CONFIG_LOCK:
             config = load_config()
@@ -2163,6 +2192,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json(); bucket = payload["bucket"]; raw_bucket_id = str(bucket["id"])[:250].replace("/", "_"); tenant_id = getattr(self, "ingest_tenant", "synova"); bucket_id = raw_bucket_id if tenant_id == "synova" else f"tw-{tenant_id}_{raw_bucket_id}"; events = payload["events"]
             hostname = str(bucket.get("hostname", "unknown"))[:200]
+            if host_removed(tenant_id, hostname): return self.send_json(410, {"error": "device_removed"})
             if host_blocked(tenant_id, hostname): return self.send_json(403, {"error": "device_blocked"})
             if not isinstance(events, list) or len(events) > 1000: raise ValueError()
             clean = [{"timestamp": str(e["timestamp"]), "duration": float(e.get("duration", 0)), "data": dict(e.get("data", {}))} for e in events]
@@ -2171,8 +2201,10 @@ class Handler(BaseHTTPRequestHandler):
             with _CONFIG_LOCK:
                 config = load_config()
                 if not device_allowed(config, tenant_id, hostname): return self.send_json(403, {"error": "device_limit_reached"})
-                version = next((str(e.get("data", {}).get("version", "")) for e in reversed(clean) if e.get("data", {}).get("version")), "")
-                register_device_signal(config, tenant_id, hostname, str(bucket.get("client", "")), version)
+                signal = next((e.get("data", {}) for e in reversed(clean) if isinstance(e.get("data"), dict) and (e.get("data", {}).get("version") or e.get("data", {}).get("device"))), {})
+                version = str(signal.get("version", ""))
+                inventory = signal.get("device") if isinstance(signal.get("device"), dict) else {}
+                register_device_signal(config, tenant_id, hostname, str(bucket.get("client", "")), version, inventory, client_ip(self.headers))
                 save_config(config)
             aw_request("POST", f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}", {"id": bucket_id, "type": str(bucket.get("type", "unknown"))[:200], "client": str(bucket.get("client", "timewatcher"))[:200], "hostname": str(bucket.get("hostname", "unknown"))[:200], "data": dict(bucket.get("data", {}))})
             if clean: aw_request("POST", f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}/events", clean)

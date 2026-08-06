@@ -94,6 +94,8 @@ type Device = {
   version?: string | null;
   updateRequested?: boolean;
   assignedPersonId?: string | null;
+  inventory?: Record<string, string>;
+  observedIp?: string | null;
 };
 type Schedule = {
   id: string;
@@ -2905,6 +2907,12 @@ function Devices({ d, reload }: { d: Data; reload: () => void }) {
     setBusy("");
     reload();
   }
+  async function remove(host: string) {
+    if (!confirm(`Remover ${host} da plataforma? O agente será bloqueado e o vínculo do colaborador será apagado. O histórico não será exibido.`)) return;
+    setBusy(host);
+    await fetch("/platform-api/dashboard/devices/delete", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify({ host }) });
+    setBusy(""); reload();
+  }
   return (
     <div className="page-stack">
       <div className="section-summary">
@@ -2922,6 +2930,7 @@ function Devices({ d, reload }: { d: Data; reload: () => void }) {
             canManage={canManage}
             busy={busy === x.id}
             onToggleBlock={() => toggleBlock(x.id, !x.blocked)}
+            onRemove={() => remove(x.id)}
           />
         ))}
       </div>
@@ -2943,11 +2952,13 @@ function DeviceCard({
   canManage,
   busy,
   onToggleBlock,
+  onRemove,
 }: {
   d: Device;
   canManage: boolean;
   busy: boolean;
   onToggleBlock: () => void;
+  onRemove: () => void;
 }) {
   const health = d.blocked ? "offline" : d.health || d.status;
   const [name, setName] = useState(d.name);
@@ -2981,7 +2992,16 @@ function DeviceCard({
           <dt>Cliques</dt>
           <dd>{d.clicks.toLocaleString("pt-BR")}</dd>
         </div>
+        <div>
+          <dt>IP observado</dt>
+          <dd>{d.observedIp || d.inventory?.localIp || "Aguardando sinal"}</dd>
+        </div>
+        <div>
+          <dt>Equipamento</dt>
+          <dd>{d.inventory?.model || d.inventory?.architecture || "Aguardando inventário"}</dd>
+        </div>
       </dl>
+      {(d.inventory?.os || d.inventory?.memoryGB) && <p className="device-inventory">{d.inventory?.os} {d.inventory?.osVersion} · {d.inventory?.architecture} · {d.inventory?.memoryGB ? `${d.inventory.memoryGB} GB RAM` : ""}</p>}
       {canManage && (
         <div className="device-actions">
           <button
@@ -2995,7 +3015,7 @@ function DeviceCard({
                 ? "Reativar acesso"
                 : "Revogar acesso"}
           </button>
-          <div className="device-inline-edit"><input value={name} onChange={e => setName(e.target.value)} /><button className="btn ghost" onClick={() => update({ name })}>Renomear</button><button className="btn ghost" onClick={() => update({ requestUpdate: true })}>{d.updateRequested ? "Atualização solicitada" : "Solicitar atualização"}</button></div>
+          <div className="device-inline-edit"><input value={name} onChange={e => setName(e.target.value)} /><button className="btn ghost" onClick={() => update({ name })}>Renomear</button><button className="btn ghost" onClick={() => update({ requestUpdate: true })}>{d.updateRequested ? "Atualização solicitada" : "Solicitar atualização"}</button><button className="btn ghost danger" disabled={busy} onClick={onRemove}>Remover agente</button></div>
         </div>
       )}
     </article>
@@ -3172,6 +3192,7 @@ function Reports({
 }) {
   const q = new URLSearchParams({ period, tenant, scope });
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [selectedReport, setSelectedReport] = useState("executive");
   const personal = scope === "self" || d.viewer.role === "member" || d.viewer.role === "employee";
   const manager = d.viewer.role === "manager" && !personal;
   const topProductive = d.apps.find((app) => app.classification === "productive");
@@ -3180,6 +3201,19 @@ function Reports({
     q.set("start", start);
     q.set("end", end);
   }
+  const defaultReports = [
+    { id: "executive", title: "Resumo executivo", detail: "Produtividade, jornada e utilização no período.", value: `${d.summary.focusScore}%` },
+    { id: "productivity", title: "Produtividade por período", detail: "Tempo produtivo, neutro e não produtivo.", value: duration(d.summary.productiveSeconds) },
+    { id: "journey", title: "Aderência à jornada", detail: "Tempo previsto, ativo, atrasos e banco de horas.", value: `${Math.round(d.summary.scheduleAdherence || 0)}%` },
+    { id: "applications", title: "Aplicações mais usadas", detail: "Ranking e classificação dos aplicativos.", value: d.apps[0]?.duration || "—" },
+    { id: "web", title: "Sites e URLs acessados", detail: "Tempo por domínio, página e classificação.", value: `${d.summary.urlCount} URLs` },
+    { id: "interaction", title: "Interações de teclado e mouse", detail: "Cliques, teclas e horários de maior atividade.", value: `${d.input.presses + d.input.clicks}` },
+    { id: "idle", title: "Ociosidade e intervalos", detail: "Tempo sem interação e impacto na jornada.", value: duration(d.summary.idleSeconds) },
+    { id: "focus", title: "Foco e concentração", detail: "Aplicações produtivas e composição do tempo.", value: `${d.summary.focusScore}%` },
+    { id: "devices", title: "Saúde dos dispositivos", detail: "Agentes, última sincronização e versão.", value: `${d.summary.onlineDeviceCount}/${d.summary.deviceCount}` },
+    { id: "screens", title: "Evidências de atividade", detail: "Quantidade de capturas autorizadas no período.", value: `${d.summary.screenshotCount}` },
+  ];
+  const chosen = defaultReports.find((item) => item.id === selectedReport) || defaultReports[0];
   return (
     <div className="page-stack">
       <div className="report-hero">
@@ -3197,6 +3231,7 @@ function Reports({
           <a href={`/platform-api/dashboard/export.json?${q}`}>Exportar JSON</a>
         </div>
       </div>
+      <section className="default-reports"><div className="default-reports-head"><div><span>RELATÓRIOS PADRÃO</span><h2>Escolha uma análise para o período selecionado</h2><p>Os 10 relatórios abaixo são calculados com os dados reais do filtro atual.</p></div><button className="text-button" onClick={() => setPreviewOpen(true)}>Abrir {chosen.title} →</button></div><div className="report-template-grid">{defaultReports.map((item) => <button key={item.id} className={selectedReport === item.id ? "selected" : ""} onClick={() => { setSelectedReport(item.id); setPreviewOpen(true); }}><span>{item.title}</span><b>{item.value}</b><small>{item.detail}</small></button>)}</div></section>
       <div className="metrics dense-metrics">
         <Metric
           label="Monitorado"
@@ -3241,13 +3276,13 @@ function Reports({
           )}
         </article>
       </div>
-      {previewOpen && <ReportPreview d={d} personal={personal} manager={manager} onClose={() => setPreviewOpen(false)} />}
+      {previewOpen && <ReportPreview d={d} personal={personal} manager={manager} report={chosen} onClose={() => setPreviewOpen(false)} />}
     </div>
   );
 }
-function ReportPreview({ d, personal, manager, onClose }: { d: Data; personal: boolean; manager: boolean; onClose: () => void }) {
-  const reportTitle = personal ? "Relatório pessoal de produtividade" : manager ? "Relatório do time" : "Relatório executivo";
-  return <div className="report-preview-backdrop" role="dialog" aria-modal="true" aria-label="Prévia do relatório"><section className="report-preview"><header><div><span>TIMEWATCHER · RELATÓRIO RENDERIZADO</span><h2>{reportTitle}</h2><p>{d.tenant.name} · {new Date(d.range.start).toLocaleDateString("pt-BR")} — {new Date(d.range.end).toLocaleDateString("pt-BR")}</p></div><div><button onClick={() => window.print()}>Imprimir / PDF</button><button className="close-preview" onClick={onClose}>Fechar</button></div></header><div className="preview-kpis"><div><span>Monitorado</span><b>{duration(d.summary.trackedSeconds)}</b></div><div><span>Ativo</span><b>{duration(d.summary.activeSeconds)}</b></div><div><span>Produtivo</span><b>{duration(d.summary.productiveSeconds)}</b></div><div><span>Produtividade</span><b>{d.summary.focusScore}%</b></div><div><span>Jornada</span><b>{Math.round(d.summary.scheduleAdherence || 0)}%</b></div></div><div className="preview-columns"><article><h3>Aplicações principais</h3>{d.apps.slice(0, 8).map(x => <div className="preview-row" key={x.name}><span>{x.name}<small>{x.classification === "productive" ? "Produtivo" : x.classification === "unproductive" ? "Não produtivo" : "Neutro"}</small></span><b>{x.duration}</b></div>) || <p>Sem aplicações no período.</p>}</article><article><h3>Sites e URLs principais</h3>{d.urls.slice(0, 8).map(x => <div className="preview-row" key={x.url}><span>{x.domain}<small>{x.title || x.classification}</small></span><b>{x.duration}</b></div>) || <p>Sem URLs no período.</p>}</article></div><footer>Dados gerados em {date(d.generatedAt)} · fonte: agentes vinculados e telemetria autorizada.</footer></section></div>;
+function ReportPreview({ d, personal, manager, report, onClose }: { d: Data; personal: boolean; manager: boolean; report: { title: string; detail: string }; onClose: () => void }) {
+  const reportTitle = report.title === "Resumo executivo" ? (personal ? "Relatório pessoal de produtividade" : manager ? "Relatório do time" : "Relatório executivo") : report.title;
+  return <div className="report-preview-backdrop" role="dialog" aria-modal="true" aria-label="Prévia do relatório"><section className="report-preview"><header><div><span>TIMEWATCHER · RELATÓRIO RENDERIZADO</span><h2>{reportTitle}</h2><p>{report.detail} · {d.tenant.name} · {new Date(d.range.start).toLocaleDateString("pt-BR")} — {new Date(d.range.end).toLocaleDateString("pt-BR")}</p></div><div><button onClick={() => window.print()}>Imprimir / PDF</button><button className="close-preview" onClick={onClose}>Fechar</button></div></header><div className="preview-kpis"><div><span>Monitorado</span><b>{duration(d.summary.trackedSeconds)}</b></div><div><span>Ativo</span><b>{duration(d.summary.activeSeconds)}</b></div><div><span>Produtivo</span><b>{duration(d.summary.productiveSeconds)}</b></div><div><span>Produtividade</span><b>{d.summary.focusScore}%</b></div><div><span>Jornada</span><b>{Math.round(d.summary.scheduleAdherence || 0)}%</b></div></div><div className="preview-columns"><article><h3>Aplicações principais</h3>{d.apps.length ? d.apps.slice(0, 8).map(x => <div className="preview-row" key={x.name}><span>{x.name}<small>{x.classification === "productive" ? "Produtivo" : x.classification === "unproductive" ? "Não produtivo" : "Neutro"}</small></span><b>{x.duration}</b></div>) : <p>Sem aplicações no período.</p>}</article><article><h3>Sites e URLs principais</h3>{d.urls.length ? d.urls.slice(0, 8).map(x => <div className="preview-row" key={x.url}><span>{x.domain}<small>{x.title || x.classification}</small></span><b>{x.duration}</b></div>) : <p>Sem URLs no período.</p>}</article></div><footer>Dados gerados em {date(d.generatedAt)} · fonte: agentes vinculados e telemetria autorizada.</footer></section></div>;
 }
 function ReportScheduling({ d }: { d: Data }) {
   const [items, setItems] = useState<{id: string; email: string; frequency: string; deliveryStatus?: string; lastSentAt?: string}[]>([]);

@@ -170,11 +170,24 @@ def sync_heartbeat(config: dict) -> bool:
     """Report agent liveness independently from user activity."""
     hostname = platform.node()
     now = datetime.now(timezone.utc).isoformat()
+    def read(command: list[str]) -> str:
+        try:
+            return subprocess.check_output(command, text=True, timeout=3).strip()
+        except Exception:
+            return ""
+    local_ip = ""
+    try:
+        import socket
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); probe.connect(("1.1.1.1", 80)); local_ip = probe.getsockname()[0]; probe.close()
+    except Exception:
+        pass
+    memory = read(["/usr/sbin/sysctl", "-n", "hw.memsize"])
+    device = {"os": platform.system(), "osVersion": platform.mac_ver()[0] or platform.release(), "model": read(["/usr/sbin/sysctl", "-n", "hw.model"]), "architecture": platform.machine(), "memoryGB": str(round(int(memory) / (1024 ** 3), 1)) if memory.isdigit() else "", "localIp": local_ip}
     return authenticated_json(
         config["server_url"].rstrip("/") + "/ingest/v1/activity-events",
         config["token"],
         {"bucket": {"id": f"timewatcher-heartbeat_{hostname}", "type": "timewatcher.heartbeat", "client": "timewatcher-agent/0.3.0", "hostname": hostname, "data": {}},
-         "events": [{"timestamp": now, "duration": 0, "data": {"version": "0.3.0", "platform": "macOS"}}]},
+         "events": [{"timestamp": now, "duration": 0, "data": {"version": "0.3.0", "platform": "macOS", "device": device}}]},
     )
 
 
