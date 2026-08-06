@@ -8,6 +8,8 @@ SSH_KEY="${TIMEWATCHER_SSH_KEY:-/Users/juankleber/Documents/Codex/2026-07-18/ten
 RELEASE_ID="$(date -u +%Y%m%d%H%M%S)"
 REMOTE_STAGE="/tmp/timewatcher-release-$RELEASE_ID"
 UPLOAD_INSTALLERS="${TIMEWATCHER_UPLOAD_INSTALLERS:-0}"
+MAC_AGENT_VERSION="0.4.0"
+MAC_AGENT_SHA=""
 
 if [[ ! -f "$SSH_KEY" ]]; then
   echo "Chave SSH não encontrada: $SSH_KEY" >&2
@@ -24,6 +26,7 @@ rsync -az --delete \
   -e "$RSYNC_SSH" "$PROJECT_DIR/timewatcher-platform/" "$REMOTE_HOST:$REMOTE_STAGE/platform/"
 if [[ "$UPLOAD_INSTALLERS" == "1" ]]; then
   "$PROJECT_DIR/installers/macos/build-pkg.sh" >/dev/null
+  MAC_AGENT_SHA="$(shasum -a 256 "$PROJECT_DIR/timewatcher-platform/public/downloads/TimeWatcher-Agent-macOS.zip" | awk '{print $1}')"
   # ZIP files are already compressed. Sending only the active individual
   # installer avoids re-uploading legacy PKG/MSI artifacts on every release.
   rsync -a -e "$RSYNC_SSH" \
@@ -87,6 +90,14 @@ wait_url http://127.0.0.1:5610/health
 # rejects anonymous access with 401 instead of serving data.
 test "\$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:5610/dashboard/data?period=today')" = "401"
 wait_url http://127.0.0.1:3110/
+if [[ '$UPLOAD_INSTALLERS' == '1' ]]; then
+  set -a
+  source /etc/watchsynova/ingest.env
+  set +a
+  curl --fail --silent --show-error -X POST http://127.0.0.1:5610/internal/agent-release \
+    -H "Authorization: Bearer $WATCHSYNOVA_INGEST_TOKEN" -H 'Content-Type: application/json' \
+    --data '{"platform":"macos","version":"$MAC_AGENT_VERSION","url":"https://timewatcher.32-193-139-223.sslip.io/downloads/TimeWatcher-Agent-macOS.zip","sha256":"$MAC_AGENT_SHA"}' >/dev/null
+fi
 rm -rf '$REMOTE_STAGE'
 REMOTE
 

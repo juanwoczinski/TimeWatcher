@@ -93,6 +93,11 @@ type Device = {
   appSeconds: number;
   version?: string | null;
   updateRequested?: boolean;
+  updateStatus?: string | null;
+  targetVersion?: string | null;
+  lastUpdateCheckAt?: string | null;
+  lastUpdatedAt?: string | null;
+  updateError?: string | null;
   assignedPersonId?: string | null;
   personName?: string | null;
   personEmail?: string | null;
@@ -177,6 +182,13 @@ type Data = {
     outsideScheduleSeconds?: number;
   };
   devices: Device[];
+  agentFleet?: {
+    total: number;
+    policy: { enabled: boolean; rolloutPercent: number; checkIntervalMinutes: number; channel: string };
+    releases: Record<string, { version: string; url: string; sha256: string; publishedAt?: string }>;
+    distribution: Record<string, number>;
+    statuses: Record<string, number>;
+  };
   apps: App[];
   urls: UrlUsage[];
   domains: {
@@ -2915,6 +2927,7 @@ const HEALTH_LABEL: Record<string, string> = {
 function Devices({ d, reload }: { d: Data; reload: () => void }) {
   const [busy, setBusy] = useState("");
   const [q, setQ] = useState(""); const [page, setPage] = useState(0); const [selected, setSelected] = useState<string | null>(null);
+  const [releasePlatform, setReleasePlatform] = useState("macos"); const [releaseVersion, setReleaseVersion] = useState(""); const [releaseUrl, setReleaseUrl] = useState(""); const [releaseSha, setReleaseSha] = useState("");
   const canManage =
     d.viewer.role === "super_admin" || d.viewer.role === "org_admin";
   async function toggleBlock(host: string, block: boolean) {
@@ -2935,14 +2948,33 @@ function Devices({ d, reload }: { d: Data; reload: () => void }) {
     await fetch("/platform-api/dashboard/devices/delete", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify({ host }) });
     setBusy(""); reload();
   }
+  async function updatePolicy(patch: object) {
+    await fetch("/platform-api/dashboard/agent-update-policy", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify({ ...(d.agentFleet?.policy || {}), ...patch }) }); reload();
+  }
+  async function updateAll() {
+    if (!confirm("Solicitar a atualização de todos os agentes desatualizados deste tenant?")) return;
+    const response = await fetch("/platform-api/dashboard/agent-update-all", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: "{}" });
+    const result = await response.json(); alert(`${result.requested || 0} agente(s) receberam a solicitação.`); reload();
+  }
+  async function publishRelease() {
+    const response = await fetch("/platform-api/dashboard/agent-releases", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify({ platform: releasePlatform, version: releaseVersion, url: releaseUrl, sha256: releaseSha }) });
+    if (!response.ok) { alert("Informe versão, URL HTTPS e SHA-256 válido com 64 caracteres."); return; }
+    setReleaseVersion(""); setReleaseUrl(""); setReleaseSha(""); reload();
+  }
   const filtered = d.devices.filter((device) => `${device.name} ${device.id} ${device.personName || ""} ${device.inventory?.sessionUser || ""} ${device.observedIp || ""}`.toLowerCase().includes(q.trim().toLowerCase()));
   const perPage = 20; const pages = Math.max(1, Math.ceil(filtered.length / perPage)); const safePage = Math.min(page, pages - 1); const shown = filtered.slice(safePage * perPage, safePage * perPage + perPage); const current = d.devices.find((device) => device.id === selected) || null;
   useEffect(() => setPage(0), [q]);
   return (
     <div className="page-stack">
+      {canManage && <article className="card fleet-console">
+        <div className="fleet-head"><div><span className="eyebrow">PARQUE DE AGENTES · CANAL ESTÁVEL</span><h2>Conformidade de versões</h2><p>Atualização assinada por checksum, rollout por tenant e confirmação pelo heartbeat.</p></div><button className="btn" onClick={updateAll}>Atualizar desatualizados</button></div>
+        <div className="fleet-kpis"><span><strong>{d.agentFleet?.total || d.devices.length}</strong> agentes</span><span><strong>{d.agentFleet?.statuses?.current || 0}</strong> atualizados</span><span><strong>{d.agentFleet?.statuses?.outdated || 0}</strong> desatualizados</span><span><strong>{(d.agentFleet?.statuses?.failed || 0) + (d.agentFleet?.statuses?.permission_required || 0)}</strong> exigem atenção</span></div>
+        <div className="fleet-policy"><label><input type="checkbox" checked={d.agentFleet?.policy?.enabled ?? true} onChange={e => updatePolicy({ enabled: e.target.checked })} /> Atualização automática</label><label>Rollout <input type="number" min="0" max="100" value={d.agentFleet?.policy?.rolloutPercent ?? 100} onChange={e => updatePolicy({ rolloutPercent: Number(e.target.value) })} />%</label><label>Consulta a cada <select value={d.agentFleet?.policy?.checkIntervalMinutes ?? 60} onChange={e => updatePolicy({ checkIntervalMinutes: Number(e.target.value) })}><option value="15">15 min</option><option value="60">1 hora</option><option value="360">6 horas</option><option value="1440">24 horas</option></select></label><span>{Object.entries(d.agentFleet?.distribution || {}).map(([version, count]) => `${version}: ${count}`).join(" · ") || "Aguardando versões"}</span></div>
+        {d.viewer.role === "super_admin" && <div className="release-form"><select value={releasePlatform} onChange={e => setReleasePlatform(e.target.value)}><option value="macos">macOS</option><option value="windows">Windows</option></select><input placeholder="Versão (ex.: 0.4.0)" value={releaseVersion} onChange={e => setReleaseVersion(e.target.value)} /><input placeholder="URL HTTPS do pacote" value={releaseUrl} onChange={e => setReleaseUrl(e.target.value)} /><input placeholder="SHA-256" value={releaseSha} onChange={e => setReleaseSha(e.target.value)} /><button className="btn ghost" onClick={publishRelease}>Publicar estável</button></div>}
+      </article>}
       <div className="people-toolbar"><div className="section-summary"><strong>{filtered.length} dispositivo(s)</strong><span>Inventário, identidade de sessão, integridade do agente e sinais coletados por host.</span></div><input className="people-search" placeholder="Buscar por host, pessoa, usuário da sessão ou IP…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
       <div className="table-wrap"><table className="data-table device-table"><thead><tr><th>Dispositivo</th><th>Colaborador</th><th>Usuário da sessão</th><th>IP</th><th>Status</th><th>Último sinal</th></tr></thead><tbody>{shown.map((x) => <tr key={x.id} className={selected === x.id ? "sel" : ""} onClick={() => setSelected(selected === x.id ? null : x.id)}><td className="cell-person"><span className="avatar tiny">⌘</span><span className="cell-person-meta"><strong>{x.name}</strong><small>{x.platform} · {x.id}</small></span></td><td>{x.personName || "Não vinculado"}<small className="table-sub">{x.personEmail || ""}</small></td><td>{x.inventory?.sessionUser || "—"}</td><td>{x.observedIp || x.inventory?.localIp || "—"}</td><td><span className={`pill ${x.blocked ? "offline" : x.health === "online" ? "online" : "offline"}`}>{x.blocked ? "removido/revogado" : HEALTH_LABEL[x.health || x.status]}</span></td><td>{date(x.lastSeen)}</td></tr>)}</tbody></table></div><Pager page={safePage} pageCount={pages} total={filtered.length} onPage={setPage} />
-      {current && <DeviceDetail d={current} canManage={canManage} busy={busy === current.id} onToggleBlock={() => toggleBlock(current.id, !current.blocked)} onRemove={() => remove(current.id)} onClose={() => setSelected(null)} />}
+      {current && <DeviceDetail d={current} canManage={canManage} busy={busy === current.id} onToggleBlock={() => toggleBlock(current.id, !current.blocked)} onRemove={() => remove(current.id)} onUpdated={reload} onClose={() => setSelected(null)} />}
     </div>
   );
 }
@@ -2952,6 +2984,7 @@ function DeviceDetail({
   busy,
   onToggleBlock,
   onRemove,
+  onUpdated,
   onClose,
 }: {
   d: Device;
@@ -2959,11 +2992,12 @@ function DeviceDetail({
   busy: boolean;
   onToggleBlock: () => void;
   onRemove: () => void;
+  onUpdated: () => void;
   onClose: () => void;
 }) {
   const health = d.blocked ? "offline" : d.health || d.status;
   const [name, setName] = useState(d.name);
-  async function update(patch: object) { await fetch("/platform-api/dashboard/devices/update", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify({ host: d.id, ...patch }) }); }
+  async function update(patch: object) { const response = await fetch("/platform-api/dashboard/devices/update", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify({ host: d.id, ...patch }) }); if (!response.ok) { const result = await response.json(); alert(result.error === "stable_release_not_published" ? `Publique primeiro uma versão estável para ${result.platform}.` : "Não foi possível atualizar o dispositivo."); return; } onUpdated(); }
   return (
     <article className={`card device-detail${d.blocked ? " blocked" : ""}`}>
       <div className="device-icon">⌘</div>
@@ -2997,6 +3031,7 @@ function DeviceDetail({
         </div>
       </dl>
       {(d.inventory?.os || d.inventory?.memoryGB) && <p className="device-inventory">{d.inventory?.os} {d.inventory?.osVersion} · {d.inventory?.architecture} · {d.inventory?.memoryGB ? `${d.inventory.memoryGB} GB RAM` : ""}</p>}
+      <div className={`device-update-state ${d.updateStatus || "unmanaged"}`}><strong>Atualização do agente</strong><span>Atual: {d.version || "desconhecida"}</span><span>Estável: {d.targetVersion || "não publicada"}</span><span>Estado: {d.updateStatus || "não gerenciado"}</span><span>Última consulta: {d.lastUpdateCheckAt ? date(d.lastUpdateCheckAt) : "aguardando"}</span>{d.updateError && <em>{d.updateError}</em>}</div>
       <div className="device-signals"><strong>Sinais coletados</strong>{Object.keys(d.signals || {}).length ? Object.entries(d.signals || {}).map(([kind, timestamp]) => <span key={kind}>{kind}: {date(timestamp)}</span>) : <span>Aguardando sinais do agente.</span>}</div>
       <div className="device-software"><strong>Softwares instalados ({d.software?.length || 0})</strong>{d.software?.length ? <div>{d.software.slice(0, 30).map(item => <span key={item}>{item}</span>)}</div> : <p>Aguardando inventário do agente.</p>}</div>
       {canManage && (

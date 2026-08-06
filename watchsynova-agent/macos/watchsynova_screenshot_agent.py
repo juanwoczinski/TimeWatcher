@@ -2,10 +2,15 @@
 """Consent-gated screenshot uploader for WatchSynova on macOS."""
 
 import json
+import hashlib
+import hmac
+import os
 import platform
 import getpass
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -16,6 +21,92 @@ from pathlib import Path
 CONFIG = Path.home() / "Library/Application Support/WatchSynova/screenshot-agent.json"
 QUEUE = Path.home() / "Library/Application Support/WatchSynova/screenshot-queue"
 SYNC_STATE = Path.home() / "Library/Application Support/WatchSynova/sync-state.json"
+UPDATE_STATE = Path.home() / "Library/Application Support/WatchSynova/update-state.json"
+AGENT_VERSION = "0.4.0"
+MAX_UPDATE_BYTES = 300 * 1024 * 1024
+
+
+def read_update_state() -> dict:
+    try:
+        return json.loads(UPDATE_STATE.read_text()) if UPDATE_STATE.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def write_update_state(state: dict) -> None:
+    UPDATE_STATE.parent.mkdir(parents=True, exist_ok=True)
+    UPDATE_STATE.write_text(json.dumps(state, indent=2))
+    UPDATE_STATE.chmod(0o600)
+
+
+def check_for_update(config: dict) -> None:
+    state = read_update_state(); now = datetime.now(timezone.utc)
+    try:
+        last = datetime.fromisoformat(str(state.get("checkedAt", "")).replace("Z", "+00:00"))
+        if (now - last).total_seconds() < max(900, int(state.get("checkIntervalMinutes", 15)) * 60):
+            return
+    except (TypeError, ValueError):
+        pass
+    state.update({"status": "checking", "checkedAt": now.isoformat(), "error": ""}); write_update_state(state)
+    query = urllib.parse.urlencode({"host": platform.node(), "platform": "macos", "version": AGENT_VERSION})
+    request = urllib.request.Request(config["server_url"].rstrip("/") + "/ingest/v1/agent-update?" + query, headers={"Authorization": f"Bearer {config['token']}"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            manifest = json.load(response)
+        state["checkIntervalMinutes"] = int((manifest.get("policy") or {}).get("checkIntervalMinutes", 60))
+        release = manifest.get("release") if manifest.get("updateAvailable") else None
+        if not release:
+            state.update({"status": "current", "targetVersion": manifest.get("currentVersion", AGENT_VERSION), "error": ""}); write_update_state(state); return
+        target_version = str(release["version"]); expected = str(release["sha256"]).lower(); url = str(release["url"])
+        if not url.startswith("https://") or len(expected) != 64:
+            raise ValueError("manifesto de atualização inválido")
+        state.update({"status": "downloading", "targetVersion": target_version}); write_update_state(state)
+        stage = Path(tempfile.mkdtemp(prefix="timewatcher-update-", dir=str(UPDATE_STATE.parent)))
+        archive = stage / "release.zip"; digest = hashlib.sha256(); total = 0
+        with urllib.request.urlopen(url, timeout=90) as response, archive.open("wb") as output:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk: break
+                total += len(chunk)
+                if total > MAX_UPDATE_BYTES: raise ValueError("pacote excede o limite permitido")
+                digest.update(chunk); output.write(chunk)
+        if not hmac.compare_digest(digest.hexdigest(), expected):
+            raise ValueError("checksum SHA-256 não confere")
+        extracted = stage / "extracted"; extracted.mkdir()
+        subprocess.run(["/usr/bin/ditto", "-x", "-k", str(archive), str(extracted)], check=True, timeout=120)
+        source = next(extracted.rglob("TimeWatcher.app"), None)
+        if not source or not (source / "Contents/MacOS/TimeWatcher").exists():
+            raise ValueError("bundle TimeWatcher.app ausente no pacote")
+        targets = [Path("/Applications/TimeWatcher.app"), Path.home() / "Applications/TimeWatcher.app"]
+        target = next((item for item in targets if item.exists()), targets[0])
+        if not os.access(target.parent, os.W_OK) or (target.exists() and not os.access(target, os.W_OK)):
+            state.update({"status": "permission_required", "error": "A instalação atual exige MDM/Jamf ou privilégio administrativo para substituir o aplicativo."}); write_update_state(state); return
+        updater = stage / "install_update.py"
+        updater.write_text("""#!/usr/bin/python3
+import json, shutil, subprocess, sys, time
+from pathlib import Path
+source, target, state_file, version = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4]
+backup = target.with_name(target.name + '.previous')
+def save(status, error=''):
+    state_file.write_text(json.dumps({'status': status, 'targetVersion': version, 'checkedAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'error': error}, indent=2))
+time.sleep(4)
+try:
+    subprocess.run(['/usr/bin/pkill', '-x', 'TimeWatcher'], check=False)
+    if backup.exists(): shutil.rmtree(backup)
+    if target.exists(): shutil.move(str(target), str(backup))
+    shutil.move(str(source), str(target))
+    subprocess.run(['/usr/bin/open', str(target)], check=True)
+    save('installed')
+except Exception as error:
+    try:
+        if target.exists(): shutil.rmtree(target)
+        if backup.exists(): shutil.move(str(backup), str(target)); subprocess.run(['/usr/bin/open', str(target)], check=False)
+    finally: save('failed', str(error))
+""")
+        updater.chmod(0o700); state.update({"status": "installing", "targetVersion": target_version}); write_update_state(state)
+        subprocess.Popen(["/usr/bin/python3", str(updater), str(source), str(target), str(UPDATE_STATE), target_version], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as error:
+        state.update({"status": "failed", "checkedAt": now.isoformat(), "error": str(error)[:500]}); write_update_state(state)
 
 
 def browser_url(app: str) -> str:
@@ -185,11 +276,12 @@ def sync_heartbeat(config: dict) -> bool:
     memory = read(["/usr/sbin/sysctl", "-n", "hw.memsize"])
     apps = sorted({item.stem for root in (Path("/Applications"), Path.home() / "Applications") if root.exists() for item in root.glob("*.app")})[:300]
     device = {"os": platform.system(), "osVersion": platform.mac_ver()[0] or platform.release(), "model": read(["/usr/sbin/sysctl", "-n", "hw.model"]), "architecture": platform.machine(), "memoryGB": str(round(int(memory) / (1024 ** 3), 1)) if memory.isdigit() else "", "localIp": local_ip, "sessionUser": getpass.getuser(), "sessionEmail": str(config.get("user_email", "")).strip().lower(), "installedSoftware": apps}
+    update = read_update_state()
     return authenticated_json(
         config["server_url"].rstrip("/") + "/ingest/v1/activity-events",
         config["token"],
-        {"bucket": {"id": f"timewatcher-heartbeat_{hostname}", "type": "timewatcher.heartbeat", "client": "timewatcher-agent/0.3.0", "hostname": hostname, "data": {}},
-         "events": [{"timestamp": now, "duration": 0, "data": {"version": "0.3.0", "platform": "macOS", "device": device}}]},
+        {"bucket": {"id": f"timewatcher-heartbeat_{hostname}", "type": "timewatcher.heartbeat", "client": f"timewatcher-agent/{AGENT_VERSION}", "hostname": hostname, "data": {}},
+         "events": [{"timestamp": now, "duration": 0, "data": {"version": AGENT_VERSION, "platform": "macOS", "device": device, "update": update}}]},
     )
 
 
@@ -218,6 +310,7 @@ def main() -> None:
     if config.get("consent") is not True:
         raise SystemExit("Screenshot capture is disabled until consent=true")
     interval = max(30, int(config.get("interval_seconds", 60)))
+    check_for_update(config)
     if "--once" in sys.argv:
         raise SystemExit(0 if run_once(config) else 1)
     if "--sync-only" in sys.argv:

@@ -26,7 +26,7 @@ codesign --force --deep --sign - "$BUILD_DIR/root/Applications/TimeWatcher.app"
 rm -f "$OUTPUT_DIR/TimeWatcher-Agent-macOS.zip"
 ditto -c -k --sequesterRsrc --keepParent "$BUILD_DIR/root/Applications/TimeWatcher.app" "$OUTPUT_DIR/TimeWatcher-Agent-macOS.zip"
 pkgbuild --root "$BUILD_DIR/root" --scripts "$BUILD_DIR/scripts" \
-  --identifier com.timewatcher.agent --version 0.3.0 \
+  --identifier com.timewatcher.agent --version 0.4.0 \
   "$OUTPUT_DIR/TimeWatcher-macOS.pkg"
 shasum -a 256 "$OUTPUT_DIR/TimeWatcher-macOS.pkg" > "$OUTPUT_DIR/TimeWatcher-macOS.pkg.sha256"
 shasum -a 256 "$OUTPUT_DIR/TimeWatcher-Agent-macOS.zip" > "$OUTPUT_DIR/TimeWatcher-Agent-macOS.zip.sha256"

@@ -1,5 +1,5 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package Name="TeamWatcher" Manufacturer="Synova Tecnologia" Version="0.2.0" UpgradeCode="A4F61A44-49FB-4B47-9D74-78628318C167" Scope="perMachine">
+  <Package Name="TimeWatcher" Manufacturer="Synova Tecnologia" Version="0.4.0" UpgradeCode="A4F61A44-49FB-4B47-9D74-78628318C167" Scope="perMachine">
     <MajorUpgrade DowngradeErrorMessage="Uma versão mais recente do TeamWatcher já está instalada." />
     <MediaTemplate EmbedCab="yes" />
     <Property Id="SERVER_URL" Value="https://timewatcher.32-193-139-223.sslip.io" Secure="yes" />
@@ -20,7 +20,7 @@
         </Component>
       </Directory>
     </StandardDirectory>
-    <Feature Id="Main" Title="TeamWatcher Agent">
+    <Feature Id="Main" Title="TimeWatcher Agent">
       <ComponentRef Id="AgentFiles" />
       <ComponentRef Id="AgentConfiguration" />
     </Feature>

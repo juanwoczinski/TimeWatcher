@@ -74,6 +74,7 @@ def default_config() -> dict:
         "integrations": {},
         "scimTokens": [],
         "agentReleases": {},
+        "agentUpdatePolicies": {},
         "monthlyClosings": [],
     }
 
@@ -269,6 +270,81 @@ def register_device_signal(config: dict, tenant_id: str, hostname: str, client: 
             entry["software"] = sorted({str(item)[:120] for item in inventory["installedSoftware"] if str(item).strip()})[:300]
     if observed_ip and observed_ip not in ("local", "unknown"):
         entry["observedIp"] = observed_ip[:80]
+
+
+def version_key(value: str) -> tuple[int, ...]:
+    """Compare normal dotted releases without trusting package-provided code."""
+    parts = re.findall(r"\d+", str(value or ""))[:4]
+    return tuple(int(part) for part in parts) if parts else (0,)
+
+
+def agent_platform(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    return "macos" if raw in ("mac", "macos", "darwin") else "windows" if raw.startswith("win") else raw
+
+
+def tenant_update_policy(config: dict, tenant_id: str) -> dict:
+    configured = (config.get("agentUpdatePolicies") or {}).get(tenant_id) or {}
+    return {
+        "enabled": bool(configured.get("enabled", True)),
+        "rolloutPercent": max(0, min(100, int(configured.get("rolloutPercent", 100) or 0))),
+        "checkIntervalMinutes": max(15, min(1440, int(configured.get("checkIntervalMinutes", 60) or 60))),
+        "channel": "stable",
+    }
+
+
+def rollout_selected(tenant_id: str, hostname: str, percent: int) -> bool:
+    cohort = int(hashlib.sha256(f"{tenant_id}:{canonical_host(hostname)}".encode()).hexdigest()[:8], 16) % 100
+    return cohort < percent
+
+
+def agent_update_manifest(config: dict, tenant_id: str, hostname: str, platform_name: str, current_version: str) -> dict:
+    platform_name = agent_platform(platform_name)
+    release = (config.get("agentReleases") or {}).get(platform_name) or {}
+    policy = tenant_update_policy(config, tenant_id)
+    entry = config.setdefault("devices", {}).setdefault(f"{tenant_id}:{canonical_host(hostname)}", {})
+    target = str(release.get("version", ""))
+    requested = bool(entry.get("updateRequested"))
+    eligible = requested or (policy["enabled"] and rollout_selected(tenant_id, hostname, policy["rolloutPercent"]))
+    available = bool(target and release.get("url") and release.get("sha256") and version_key(target) > version_key(current_version))
+    entry["lastUpdateCheckAt"] = datetime.now(timezone.utc).isoformat()
+    entry["targetVersion"] = target or None
+    if requested and not release:
+        entry["updateStatus"] = "release_unavailable"
+    elif available and eligible:
+        entry["updateStatus"] = "offered"
+    elif target and version_key(current_version) >= version_key(target):
+        entry["updateStatus"] = "current"
+        entry["updateRequested"] = False
+    return {
+        "updateAvailable": available and eligible,
+        "requested": requested,
+        "currentVersion": current_version,
+        "release": release if available and eligible else None,
+        "policy": policy,
+    }
+
+
+def agent_fleet_summary(config: dict, tenant_id: str) -> dict:
+    releases = config.get("agentReleases") or {}
+    distribution: dict[str, int] = defaultdict(int)
+    statuses: dict[str, int] = defaultdict(int)
+    rows = []
+    for key, entry in (config.get("devices") or {}).items():
+        if not key.startswith(f"{tenant_id}:"):
+            continue
+        host = key.split(":", 1)[1]
+        inventory = entry.get("inventory") or {}
+        platform_name = agent_platform(inventory.get("os") or ("macos" if "mac" in host.lower() else "windows"))
+        version = str(entry.get("version") or "desconhecida")
+        target = str((releases.get(platform_name) or {}).get("version") or "")
+        status = str(entry.get("updateStatus") or "")
+        if target and version_key(version) >= version_key(target): status = "current"
+        elif target and status not in ("requested", "offered", "downloading", "installing", "failed", "permission_required"): status = "outdated"
+        elif not target: status = "unmanaged"
+        distribution[version] += 1; statuses[status] += 1
+        rows.append({"host": host, "platform": platform_name, "version": version, "targetVersion": target or None, "status": status, "lastCheckAt": entry.get("lastUpdateCheckAt"), "lastUpdatedAt": entry.get("lastUpdatedAt"), "error": entry.get("updateError")})
+    return {"policy": tenant_update_policy(config, tenant_id), "releases": releases, "total": len(rows), "distribution": dict(distribution), "statuses": dict(statuses), "devices": rows}
 
 
 def readiness_snapshot(config: dict, tenant_id: str) -> dict:
@@ -804,7 +880,7 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
         return "online" if age < 300 else "stale" if age < 3600 else "offline"
     registry = config.get("devices") or {}
     people_by_host = {canonical_host(person.get("host")): person for person in config.get("people", []) if person.get("tenantId") == tenant_id and person.get("host")}
-    devices = [{"id": host, "name": (registry.get(f"{tenant_id}:{host}") or {}).get("name") or host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop", "lastSeen": seen.isoformat(), "status": "online" if (end - seen).total_seconds() < 300 else "offline", "health": device_health(seen), "client": clients_by_host.get(host), "version": (registry.get(f"{tenant_id}:{host}") or {}).get("version") or clients_by_host.get(host), "updateRequested": bool((registry.get(f"{tenant_id}:{host}") or {}).get("updateRequested")), "assignedPersonId": (registry.get(f"{tenant_id}:{host}") or {}).get("personId"), "personName": (people_by_host.get(host) or {}).get("name"), "personEmail": (people_by_host.get(host) or {}).get("email"), "blocked": host in blocked_hosts, "inventory": (registry.get(f"{tenant_id}:{host}") or {}).get("inventory", {}), "software": (registry.get(f"{tenant_id}:{host}") or {}).get("software", []), "observedIp": (registry.get(f"{tenant_id}:{host}") or {}).get("observedIp"), "trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "presses": presses, "clicks": clicks, "signals": {name: timestamp.isoformat() for name, timestamp in signals_by_host.get(host, {}).items()}} for host, seen in sorted(devices_by_host.items())]
+    devices = [{"id": host, "name": (registry.get(f"{tenant_id}:{host}") or {}).get("name") or host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop", "lastSeen": seen.isoformat(), "status": "online" if (end - seen).total_seconds() < 300 else "offline", "health": device_health(seen), "client": clients_by_host.get(host), "version": (registry.get(f"{tenant_id}:{host}") or {}).get("version") or clients_by_host.get(host), "updateRequested": bool((registry.get(f"{tenant_id}:{host}") or {}).get("updateRequested")), "updateStatus": (registry.get(f"{tenant_id}:{host}") or {}).get("updateStatus"), "targetVersion": (registry.get(f"{tenant_id}:{host}") or {}).get("targetVersion"), "lastUpdateCheckAt": (registry.get(f"{tenant_id}:{host}") or {}).get("lastUpdateCheckAt"), "lastUpdatedAt": (registry.get(f"{tenant_id}:{host}") or {}).get("lastUpdatedAt"), "updateError": (registry.get(f"{tenant_id}:{host}") or {}).get("updateError"), "assignedPersonId": (registry.get(f"{tenant_id}:{host}") or {}).get("personId"), "personName": (people_by_host.get(host) or {}).get("name"), "personEmail": (people_by_host.get(host) or {}).get("email"), "blocked": host in blocked_hosts, "inventory": (registry.get(f"{tenant_id}:{host}") or {}).get("inventory", {}), "software": (registry.get(f"{tenant_id}:{host}") or {}).get("software", []), "observedIp": (registry.get(f"{tenant_id}:{host}") or {}).get("observedIp"), "trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "presses": presses, "clicks": clicks, "signals": {name: timestamp.isoformat() for name, timestamp in signals_by_host.get(host, {}).items()}} for host, seen in sorted(devices_by_host.items())]
     _managed = managed_team_ids(config, current_viewer.get("email", ""), tenant_id) if current_viewer["role"] == "manager" else None
     _member = member_person(config, current_viewer) if current_viewer["role"] in ("member", "employee") else None
     people = [person.copy() for person in config["people"] if person["tenantId"] == tenant_id and (_managed is None or person.get("teamId") in _managed) and (_member is None or person.get("id") == _member.get("id"))]
@@ -831,7 +907,7 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
         "period": period, "range": {"start": start.isoformat(), "end": end.isoformat()}, "generatedAt": datetime.now(timezone.utc).isoformat(),
         "person": person, "people": people, "schedules": [s for s in config["schedules"] if s["tenantId"] == tenant_id], "schedule": schedule,
         "summary": {"trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "idleSeconds": round(idle_seconds, 3), "productiveSeconds": round(productive, 3), "neutralSeconds": round(category_seconds["neutral"], 3), "unproductiveSeconds": round(category_seconds["unproductive"], 3), "focusScore": score, "deviceCount": len(devices), "onlineDeviceCount": sum(d["status"] == "online" for d in devices), "screenshotCount": screenshot_count, "urlCount": len(urls), "webSeconds": round(web_total, 3), "inputSeconds": round(input_seconds, 3), "lastSeen": max(last_seen_values).isoformat() if last_seen_values else None, **journey},
-        "devices": devices, "apps": apps[:100], "urls": urls[:200], "domains": [{"domain": d, "seconds": round(s, 3), "duration": duration_label(s), "classification": classify(d, rules)} for d, s in sorted(domain_seconds.items(), key=lambda item: item[1], reverse=True)],
+        "devices": devices, "agentFleet": agent_fleet_summary(config, tenant_id), "apps": apps[:100], "urls": urls[:200], "domains": [{"domain": d, "seconds": round(s, 3), "duration": duration_label(s), "classification": classify(d, rules)} for d, s in sorted(domain_seconds.items(), key=lambda item: item[1], reverse=True)],
         "timeline": [{"hour": h, "label": f"{h:02d}h", "seconds": round(hourly[h], 3)} for h in range(24) if hourly[h] > 0],
         "interactionTimeline": [{"hour": h, "label": f"{h:02d}", "presses": input_hourly[h]["presses"], "clicks": input_hourly[h]["clicks"], "seconds": round(input_hourly[h]["seconds"], 3)} for h in range(24)],
         "webTimeline": [{"hour": h, "label": f"{h:02d}", "seconds": round(web_hourly[h], 3), "productiveSeconds": round(productive_hourly[h], 3)} for h in range(24)],
@@ -1609,6 +1685,21 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/auth/reset-info": return self.reset_info(params)
         if parsed.path == "/auth/me":
             return self.send_json(200, current) if current else self.send_json(401, {"error": "unauthenticated"})
+        if parsed.path == "/v1/agent-update":
+            supplied = self.headers.get("Authorization", "")
+            tenant_id = ingest_tenant(supplied[7:]) if supplied.startswith("Bearer ") else None
+            if not tenant_id: return self.send_json(401, {"error": "unauthorized"})
+            hostname = canonical_host(str(params.get("host", [""])[0])[:200])
+            platform_name = agent_platform(params.get("platform", [""])[0])
+            current_version = str(params.get("version", [""])[0])[:80]
+            if not hostname or platform_name not in ("macos", "windows") or not current_version:
+                return self.send_json(400, {"error": "host_platform_version_required"})
+            with _CONFIG_LOCK:
+                config = load_config()
+                if host_removed(tenant_id, hostname): return self.send_json(410, {"error": "device_removed"})
+                result = agent_update_manifest(config, tenant_id, hostname, platform_name, current_version)
+                save_config(config)
+            return self.send_json(200, result)
         if parsed.path.startswith("/dashboard/") and not current: return self.send_json(401, {"error": "unauthenticated"})
         if current and current["role"] in ("member", "employee") and (parsed.path.startswith("/dashboard/screenshots") or parsed.path in ("/dashboard/teams", "/dashboard/alerts", "/dashboard/billing", "/dashboard/policies", "/dashboard/audit", "/dashboard/digests", "/dashboard/trends", "/dashboard/intelligence", "/dashboard/invites")):
             return self.send_json(403, {"error": "forbidden"})
@@ -1636,6 +1727,10 @@ class Handler(BaseHTTPRequestHandler):
             state = config.setdefault("onboarding", {}).get(tid, {})
             people = [p for p in config.get("people", []) if p.get("tenantId") == tid]
             return self.send_json(200, {"tenantId": tid, "steps": {"company": True, "schedule": any(s.get("tenantId") == tid for s in config.get("schedules", [])), "users": bool(people), "installer": any(e.get("tenantId") == tid and parse_timestamp(e.get("expiresAt")) > datetime.now(timezone.utc) for e in config.get("enrollments", [])), "device": any(p.get("tenantId") == tid and p.get("host") for p in people)}, "state": state})
+        if parsed.path == "/dashboard/agent-fleet":
+            if current["role"] not in ("super_admin", "org_admin"): return self.send_json(403, {"error": "forbidden"})
+            config = load_config(); tid = params.get("tenant", [current["tenantId"]])[0] if current["role"] == "super_admin" else current["tenantId"]
+            return self.send_json(200, agent_fleet_summary(config, tid))
         if parsed.path == "/dashboard/journey-adjustments":
             config = load_config(); tid = params.get("tenant", [current["tenantId"]])[0] if current["role"] == "super_admin" else current["tenantId"]
             items = [x for x in config.get("journeyAdjustments", []) if x.get("tenantId") == tid]
@@ -1715,6 +1810,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlsplit(self.path); current = viewer(self.headers)
+        if parsed.path == "/internal/agent-release":
+            supplied = self.headers.get("Authorization", "")
+            if not supplied.startswith("Bearer ") or not hmac.compare_digest(supplied[7:], TOKEN): return self.send_json(401, {"error": "unauthorized"})
+            try: payload = self.read_json()
+            except Exception: return self.send_json(400, {"error": "invalid_json"})
+            platform_name = agent_platform(payload.get("platform")); version = str(payload.get("version", ""))[:80]; url = str(payload.get("url", ""))[:1000]; sha = str(payload.get("sha256", "")).lower()
+            if platform_name not in ("macos", "windows") or not version or not url.startswith("https://") or not re.fullmatch(r"[a-f0-9]{64}", sha): return self.send_json(400, {"error": "invalid_release"})
+            with _CONFIG_LOCK:
+                config = load_config(); release = {"version": version, "url": url, "sha256": sha, "publishedAt": datetime.now(timezone.utc).isoformat(), "publishedBy": "deployment"}; config.setdefault("agentReleases", {})[platform_name] = release; save_config(config)
+            audit("agent.release.publish", "deployment", {"platform": platform_name, "version": version}); return self.send_json(201, release)
         if parsed.path.startswith("/scim/v2/"):
             try: payload = self.read_json()
             except Exception: return self.send_json(400, {"detail": "invalid_json"})
@@ -2011,8 +2116,29 @@ class Handler(BaseHTTPRequestHandler):
                         if not person: return self.send_json(404, {"error": "person_not_found"})
                         entry["personId"] = person["id"]; person["host"] = host
                     if payload.get("revoke"): config.setdefault("blockedHosts", {}).setdefault(tid, []); config["blockedHosts"][tid] = list(set(config["blockedHosts"][tid] + [host]))
-                    if payload.get("requestUpdate"): entry["updateRequested"] = True; entry["requestedAt"] = datetime.now(timezone.utc).isoformat()
+                    if payload.get("requestUpdate"):
+                        platform_name = agent_platform((entry.get("inventory") or {}).get("os") or ("macos" if "mac" in host.lower() else "windows"))
+                        release = (config.get("agentReleases") or {}).get(platform_name) or {}
+                        if not release.get("version"): return self.send_json(409, {"error": "stable_release_not_published", "platform": platform_name})
+                        entry["updateRequested"] = True; entry["requestedAt"] = datetime.now(timezone.utc).isoformat(); entry["targetVersion"] = release["version"]; entry["updateStatus"] = "requested"; entry.pop("updateError", None)
                     save_config(config); audit("device.update", current["email"], {"tenant": tid, "host": host, "personId": entry.get("personId"), "updateRequested": bool(payload.get("requestUpdate"))}); return self.send_json(200, {"host": host, **entry})
+                if parsed.path == "/dashboard/agent-update-policy":
+                    tid = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
+                    policy = tenant_update_policy({"agentUpdatePolicies": {tid: payload}}, tid)
+                    config.setdefault("agentUpdatePolicies", {})[tid] = policy
+                    save_config(config); audit("agent.policy.update", current["email"], {"tenant": tid, **policy})
+                    return self.send_json(200, policy)
+                if parsed.path == "/dashboard/agent-update-all":
+                    tid = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
+                    requested = 0; now = datetime.now(timezone.utc).isoformat()
+                    for key, entry in config.setdefault("devices", {}).items():
+                        if not key.startswith(f"{tid}:"): continue
+                        platform_name = agent_platform((entry.get("inventory") or {}).get("os") or ("macos" if "mac" in key.lower() else "windows"))
+                        release = (config.get("agentReleases") or {}).get(platform_name) or {}
+                        if release.get("version") and version_key(entry.get("version", "")) < version_key(release["version"]):
+                            entry.update({"updateRequested": True, "requestedAt": now, "targetVersion": release["version"], "updateStatus": "requested"}); entry.pop("updateError", None); requested += 1
+                    save_config(config); audit("agent.update_all", current["email"], {"tenant": tid, "requested": requested})
+                    return self.send_json(200, {"requested": requested})
                 if parsed.path == "/dashboard/devices/delete":
                     host = str(payload.get("host", "")).strip()
                     if not host: return self.send_json(400, {"error": "host_required"})
@@ -2035,7 +2161,7 @@ class Handler(BaseHTTPRequestHandler):
                     platform_name = str(payload.get("platform", "macos")).lower()
                     if platform_name not in ("macos", "windows"): return self.send_json(400, {"error": "invalid_platform"})
                     version = str(payload.get("version", "")).strip()[:80]; url = str(payload.get("url", "")).strip()[:1000]; sha = str(payload.get("sha256", "")).strip().lower()
-                    if not version or not url.startswith("https://") or (sha and not re.fullmatch(r"[a-f0-9]{64}", sha)): return self.send_json(400, {"error": "invalid_release"})
+                    if not version or not url.startswith("https://") or not re.fullmatch(r"[a-f0-9]{64}", sha): return self.send_json(400, {"error": "invalid_release"})
                     release = {"version": version, "url": url, "sha256": sha, "publishedAt": datetime.now(timezone.utc).isoformat(), "publishedBy": current["email"]}
                     config.setdefault("agentReleases", {})[platform_name] = release; save_config(config); audit("agent.release.publish", current["email"], {"platform": platform_name, "version": version}); return self.send_json(201, release)
                 if parsed.path == "/dashboard/tenants":
@@ -2347,11 +2473,22 @@ class Handler(BaseHTTPRequestHandler):
             aw_request("POST", f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}", {"id": bucket_id, "type": str(bucket.get("type", "unknown"))[:200], "client": str(bucket.get("client", "timewatcher"))[:200], "hostname": str(bucket.get("hostname", "unknown"))[:200], "data": dict(bucket.get("data", {}))})
             if clean: aw_request("POST", f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}/events", clean)
             if str(bucket.get("type")) == "timewatcher.heartbeat":
-                version = next((str(e.get("data", {}).get("version", "")) for e in reversed(clean) if e.get("data", {}).get("version")), "")
+                heartbeat = next((e.get("data", {}) for e in reversed(clean) if e.get("data", {}).get("version")), {})
+                version = str(heartbeat.get("version", "")); update = heartbeat.get("update") if isinstance(heartbeat.get("update"), dict) else {}
                 with _CONFIG_LOCK:
                     config = load_config()
                     entry = config.setdefault("devices", {}).setdefault(f"{tenant_id}:{hostname}", {})
-                    entry["lastHeartbeatAt"] = datetime.now(timezone.utc).isoformat(); entry["updateRequested"] = False
+                    now = datetime.now(timezone.utc).isoformat(); entry["lastHeartbeatAt"] = now
+                    if update:
+                        status = str(update.get("status", ""))[:80]
+                        if status: entry["updateStatus"] = status
+                        if update.get("checkedAt"): entry["lastUpdateCheckAt"] = str(update["checkedAt"])[:80]
+                        if update.get("targetVersion"): entry["targetVersion"] = str(update["targetVersion"])[:80]
+                        if update.get("error"): entry["updateError"] = str(update["error"])[:500]
+                        elif status in ("current", "installed"): entry.pop("updateError", None)
+                    target = str(entry.get("targetVersion") or "")
+                    if target and version and version_key(version) >= version_key(target):
+                        entry["updateRequested"] = False; entry["updateStatus"] = "current"; entry["lastUpdatedAt"] = now; entry.pop("updateError", None)
                     save_config(config)
             with _CACHE_LOCK: _AW_CACHE.clear()
         except (KeyError, TypeError, ValueError, json.JSONDecodeError): return self.send_json(400, {"error": "invalid_payload"})
