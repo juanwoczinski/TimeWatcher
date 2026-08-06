@@ -70,6 +70,7 @@ type UrlUsage = {
   url: string;
   domain: string;
   title: string;
+  accessRole?: Role | null;
   seconds: number;
   duration: string;
   classification: "productive" | "neutral" | "unproductive";
@@ -138,6 +139,15 @@ type Person = {
   idleSeconds: number;
   productiveSeconds: number;
   focusScore: number;
+  expectedSeconds?: number;
+  scheduledActiveSeconds?: number;
+  scheduledProductiveSeconds?: number;
+  scheduleAdherence?: number;
+  productivityIndex?: number;
+  outsideScheduleSeconds?: number;
+  inputSeconds?: number;
+  webSeconds?: number;
+  appSeconds?: number;
   expectedSeconds?: number;
   scheduleAdherence?: number;
   productivityIndex?: number;
@@ -1455,7 +1465,7 @@ type Directory = {
   people: DirPerson[];
   schedules: Schedule[];
   teams: { id: string; name: string }[];
-  counts: { people: number; online: number };
+  counts: { people: number; online: number; withDevice?: number; withoutDevice?: number; withAccess?: number };
 };
 const LICENSE_LABEL: Record<string, string> = {
   essential: "Essential",
@@ -1505,6 +1515,7 @@ function Pager({
 const PEOPLE_PER_PAGE = 12;
 function People({ d, reload }: { d: Data; reload: () => void }) {
   const [dir, setDir] = useState<Directory | null>(null);
+  const [loadError, setLoadError] = useState("");
   const [q, setQ] = useState("");
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
@@ -1520,15 +1531,22 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
     d.viewer.role === "super_admin" || d.viewer.role === "org_admin";
 
   const load = useCallback(async () => {
-    const res = await fetch(`/platform-api/dashboard/people?period=${d.period}`);
-    if (res.ok) setDir(await res.json());
-  }, [d.period]);
+    setLoadError("");
+    const query = new URLSearchParams({ period: d.period, scope: d.scope || "default", tenant: d.tenant.id });
+    try {
+      const res = await fetch(`/platform-api/dashboard/people?${query}`, { credentials: "same-origin", cache: "no-store" });
+      if (!res.ok) throw new Error(String(res.status));
+      setDir(await res.json());
+    } catch { setLoadError("Não foi possível carregar o diretório agora."); }
+  }, [d.period, d.scope, d.tenant.id, d.generatedAt]);
   useEffect(() => {
     load();
   }, [load]);
 
   const teamName = (id: string | null) =>
     (id && dir?.teams.find((t) => t.id === id)?.name) || "Sem time";
+  const scheduleName = (id: string | null) => (id && dir?.schedules.find((s) => s.id === id)?.name) || "Sem jornada";
+  const accessLabel: Record<string, string> = { super_admin: "Super admin", org_admin: "Admin da organização", manager: "Gestor", member: "Colaborador", employee: "Colaborador" };
   const people = (dir?.people || []).filter((person) => {
     const t = q.trim().toLowerCase();
     return (
@@ -1589,17 +1607,14 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
 
   return (
     <div className="page-stack">
-      <div className="people-toolbar">
-        <div className="section-summary">
-          <strong>{dir?.counts.people ?? 0} pessoa(s)</strong>
-          <span>
-            {dir?.counts.online ?? 0} online agora · cadastro + telemetria do
-            agente por colaborador.
-          </span>
-        </div>
+      <section className="directory-overview">
+        <div><span className="eyebrow">DIRETÓRIO DA ORGANIZAÇÃO</span><h2>Pessoas, acesso e vínculo operacional</h2><p>Colaboradores são identidades da organização; dispositivos e telemetria aparecem vinculados ao perfil.</p></div>
+        <div className="directory-kpis"><span><strong>{dir?.counts.people ?? "—"}</strong>Total</span><span><strong>{dir?.counts.online ?? "—"}</strong>Online</span><span><strong>{dir?.counts.withDevice ?? "—"}</strong>Com dispositivo</span><span><strong>{dir?.counts.withoutDevice ?? "—"}</strong>Sem dispositivo</span></div>
+      </section>
+      <div className="people-toolbar directory-toolbar">
         <input
           className="people-search"
-          placeholder="Buscar por nome, e-mail, dispositivo ou time…"
+          placeholder="Buscar por pessoa, e-mail, cargo, OU ou dispositivo…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
@@ -1643,7 +1658,7 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
         </div>
       )}
       {!dir ? (
-        <State text="Carregando pessoas…" />
+        loadError ? <div className="load-error"><strong>{loadError}</strong><button className="btn ghost" onClick={load}>Tentar novamente</button></div> : <State text="Carregando diretório…" />
       ) : people.length === 0 ? (
         <State
           text={
@@ -1659,11 +1674,11 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
               <thead>
                 <tr>
                   <th>Pessoa</th>
-                  <th>OU</th>
-                  <th>Licença</th>
+                  <th>Cargo e acesso</th>
+                  <th>OU e jornada</th>
+                  <th>Dispositivo</th>
                   <th>Status</th>
                   <th className="num">Monitorado</th>
-                  <th className="num">Ativo</th>
                   <th className="num">Foco</th>
                   <th>Visto</th>
                 </tr>
@@ -1683,26 +1698,18 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
                       </span>
                       <span className="cell-person-meta">
                         <strong>{person.name}</strong>
-                        <small>{person.device || person.email || "—"}</small>
+                        <small>{person.email || "Sem e-mail vinculado"}</small>
                       </span>
                     </td>
-                    <td>{teamName(person.teamId)}</td>
-                    <td>
-                      {person.licenseType ? (
-                        <span className={`lic-tag ${person.licenseType}`}>
-                          {LICENSE_LABEL[person.licenseType]}
-                        </span>
-                      ) : (
-                        <span className="lic-tag none">—</span>
-                      )}
-                    </td>
+                    <td><strong className="table-primary">{person.title || "Colaborador"}</strong><small className="table-sub">{person.accessRole ? accessLabel[person.accessRole] || person.accessRole : "Sem acesso à console"}</small></td>
+                    <td><strong className="table-primary">{teamName(person.teamId)}</strong><small className="table-sub">{scheduleName(person.scheduleId)}</small></td>
+                    <td><strong className="table-primary">{person.host ? person.device : "Não vinculado"}</strong><small className="table-sub">{person.host ? person.platform : "Aguardando agente"}</small></td>
                     <td>
                       <span className={`pill ${person.status}`}>
                         {person.status}
                       </span>
                     </td>
                     <td className="num">{duration(person.trackedSeconds)}</td>
-                    <td className="num">{duration(person.activeSeconds)}</td>
                     <td className="num">{person.focusScore}%</td>
                     <td>{date(person.lastSeen)}</td>
                   </tr>
@@ -1734,6 +1741,7 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
                   {LICENSE_LABEL[current.licenseType]}
                 </span>
               )}
+              {current.accessRole && <span className="access-tag">{accessLabel[current.accessRole] || current.accessRole}</span>}
               <span className={`pill ${current.status}`}>{current.status}</span>
               {canEdit && (
                 <button
@@ -2926,10 +2934,11 @@ const HEALTH_LABEL: Record<string, string> = {
 };
 function Devices({ d, reload }: { d: Data; reload: () => void }) {
   const [busy, setBusy] = useState("");
-  const [q, setQ] = useState(""); const [page, setPage] = useState(0); const [selected, setSelected] = useState<string | null>(null);
+  const [q, setQ] = useState(""); const [statusFilter, setStatusFilter] = useState("all"); const [page, setPage] = useState(0); const [selected, setSelected] = useState<string | null>(null); const [directory, setDirectory] = useState<Directory | null>(null);
   const [releasePlatform, setReleasePlatform] = useState("macos"); const [releaseVersion, setReleaseVersion] = useState(""); const [releaseUrl, setReleaseUrl] = useState(""); const [releaseSha, setReleaseSha] = useState("");
   const canManage =
     d.viewer.role === "super_admin" || d.viewer.role === "org_admin";
+  useEffect(() => { const query = new URLSearchParams({ period: d.period, scope: d.scope || "default", tenant: d.tenant.id }); fetch(`/platform-api/dashboard/people?${query}`, { credentials: "same-origin", cache: "no-store" }).then(r => r.ok ? r.json() : null).then(setDirectory).catch(() => setDirectory(null)); }, [d.period, d.scope, d.tenant.id, d.generatedAt]);
   async function toggleBlock(host: string, block: boolean) {
     if (block && !confirm(`Revogar o acesso de ${host}? O agente para de enviar dados até ser reativado.`)) return;
     setBusy(host);
@@ -2961,25 +2970,27 @@ function Devices({ d, reload }: { d: Data; reload: () => void }) {
     if (!response.ok) { alert("Informe versão, URL HTTPS e SHA-256 válido com 64 caracteres."); return; }
     setReleaseVersion(""); setReleaseUrl(""); setReleaseSha(""); reload();
   }
-  const filtered = d.devices.filter((device) => `${device.name} ${device.id} ${device.personName || ""} ${device.inventory?.sessionUser || ""} ${device.observedIp || ""}`.toLowerCase().includes(q.trim().toLowerCase()));
+  const filtered = d.devices.filter((device) => `${device.name} ${device.id} ${device.personName || ""} ${device.inventory?.sessionUser || ""} ${device.observedIp || ""}`.toLowerCase().includes(q.trim().toLowerCase()) && (statusFilter === "all" || (statusFilter === "online" ? !device.blocked && device.health === "online" : statusFilter === "attention" ? device.blocked || device.health !== "online" || ["failed", "permission_required", "outdated"].includes(device.updateStatus || "") : true)));
   const perPage = 20; const pages = Math.max(1, Math.ceil(filtered.length / perPage)); const safePage = Math.min(page, pages - 1); const shown = filtered.slice(safePage * perPage, safePage * perPage + perPage); const current = d.devices.find((device) => device.id === selected) || null;
   useEffect(() => setPage(0), [q]);
   return (
     <div className="page-stack">
-      {canManage && <article className="card fleet-console">
+      <section className="device-overview"><div><span className="eyebrow">INVENTÁRIO E TELEMETRIA</span><h2>Saúde do parque</h2><p>Da identidade do equipamento até a última coleta enviada por cada sensor.</p></div><div className="device-kpis"><span><strong>{d.devices.length}</strong>Total</span><span><strong>{d.devices.filter(x => !x.blocked && x.health === "online").length}</strong>Online</span><span><strong>{d.devices.filter(x => x.personName).length}</strong>Vinculados</span><span><strong>{d.devices.filter(x => x.blocked || x.health !== "online" || ["failed", "permission_required", "outdated"].includes(x.updateStatus || "")).length}</strong>Atenção</span></div></section>
+      {canManage && <article className="card fleet-console compact-fleet">
         <div className="fleet-head"><div><span className="eyebrow">PARQUE DE AGENTES · CANAL ESTÁVEL</span><h2>Conformidade de versões</h2><p>Atualização assinada por checksum, rollout por tenant e confirmação pelo heartbeat.</p></div><button className="btn" onClick={updateAll}>Atualizar desatualizados</button></div>
         <div className="fleet-kpis"><span><strong>{d.agentFleet?.total || d.devices.length}</strong> agentes</span><span><strong>{d.agentFleet?.statuses?.current || 0}</strong> atualizados</span><span><strong>{d.agentFleet?.statuses?.outdated || 0}</strong> desatualizados</span><span><strong>{(d.agentFleet?.statuses?.failed || 0) + (d.agentFleet?.statuses?.permission_required || 0)}</strong> exigem atenção</span></div>
         <div className="fleet-policy"><label><input type="checkbox" checked={d.agentFleet?.policy?.enabled ?? true} onChange={e => updatePolicy({ enabled: e.target.checked })} /> Atualização automática</label><label>Rollout <input type="number" min="0" max="100" value={d.agentFleet?.policy?.rolloutPercent ?? 100} onChange={e => updatePolicy({ rolloutPercent: Number(e.target.value) })} />%</label><label>Consulta a cada <select value={d.agentFleet?.policy?.checkIntervalMinutes ?? 60} onChange={e => updatePolicy({ checkIntervalMinutes: Number(e.target.value) })}><option value="15">15 min</option><option value="60">1 hora</option><option value="360">6 horas</option><option value="1440">24 horas</option></select></label><span>{Object.entries(d.agentFleet?.distribution || {}).map(([version, count]) => `${version}: ${count}`).join(" · ") || "Aguardando versões"}</span></div>
         {d.viewer.role === "super_admin" && <div className="release-form"><select value={releasePlatform} onChange={e => setReleasePlatform(e.target.value)}><option value="macos">macOS</option><option value="windows">Windows</option></select><input placeholder="Versão (ex.: 0.4.0)" value={releaseVersion} onChange={e => setReleaseVersion(e.target.value)} /><input placeholder="URL HTTPS do pacote" value={releaseUrl} onChange={e => setReleaseUrl(e.target.value)} /><input placeholder="SHA-256" value={releaseSha} onChange={e => setReleaseSha(e.target.value)} /><button className="btn ghost" onClick={publishRelease}>Publicar estável</button></div>}
       </article>}
-      <div className="people-toolbar"><div className="section-summary"><strong>{filtered.length} dispositivo(s)</strong><span>Inventário, identidade de sessão, integridade do agente e sinais coletados por host.</span></div><input className="people-search" placeholder="Buscar por host, pessoa, usuário da sessão ou IP…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
-      <div className="table-wrap"><table className="data-table device-table"><thead><tr><th>Dispositivo</th><th>Colaborador</th><th>Usuário da sessão</th><th>IP</th><th>Status</th><th>Último sinal</th></tr></thead><tbody>{shown.map((x) => <tr key={x.id} className={selected === x.id ? "sel" : ""} onClick={() => setSelected(selected === x.id ? null : x.id)}><td className="cell-person"><span className="avatar tiny">⌘</span><span className="cell-person-meta"><strong>{x.name}</strong><small>{x.platform} · {x.id}</small></span></td><td>{x.personName || "Não vinculado"}<small className="table-sub">{x.personEmail || ""}</small></td><td>{x.inventory?.sessionUser || "—"}</td><td>{x.observedIp || x.inventory?.localIp || "—"}</td><td><span className={`pill ${x.blocked ? "offline" : x.health === "online" ? "online" : "offline"}`}>{x.blocked ? "removido/revogado" : HEALTH_LABEL[x.health || x.status]}</span></td><td>{date(x.lastSeen)}</td></tr>)}</tbody></table></div><Pager page={safePage} pageCount={pages} total={filtered.length} onPage={setPage} />
-      {current && <DeviceDetail d={current} canManage={canManage} busy={busy === current.id} onToggleBlock={() => toggleBlock(current.id, !current.blocked)} onRemove={() => remove(current.id)} onUpdated={reload} onClose={() => setSelected(null)} />}
+      <div className="device-toolbar"><input className="people-search" placeholder="Buscar por equipamento, pessoa, sessão ou IP…" value={q} onChange={(e) => setQ(e.target.value)} /><div className="segmented"><button className={statusFilter === "all" ? "active" : ""} onClick={() => setStatusFilter("all")}>Todos</button><button className={statusFilter === "online" ? "active" : ""} onClick={() => setStatusFilter("online")}>Online</button><button className={statusFilter === "attention" ? "active" : ""} onClick={() => setStatusFilter("attention")}>Atenção</button></div></div>
+      <div className="table-wrap"><table className="data-table device-table"><thead><tr><th>Equipamento</th><th>Responsável</th><th>Coletores</th><th>Agente</th><th>Último sinal</th><th>Saúde</th></tr></thead><tbody>{shown.map((x) => { const signals = Object.keys(x.signals || {}).length; return <tr key={x.id} className={selected === x.id ? "sel" : ""} onClick={() => setSelected(selected === x.id ? null : x.id)}><td className="cell-person"><span className="device-os-icon">{x.platform === "macOS" ? "⌘" : "▣"}</span><span className="cell-person-meta"><strong>{x.name}</strong><small>{x.inventory?.model || x.id}</small></span></td><td><strong className="table-primary">{x.personName || "Não vinculado"}</strong><small className="table-sub">{x.inventory?.sessionUser ? `Sessão ${x.inventory.sessionUser}` : "Sem identidade de sessão"}</small></td><td><strong className="table-primary">{signals}/6 sinais</strong><small className="table-sub">{signals >= 5 ? "Coleta completa" : "Verificar sensores"}</small></td><td><strong className="table-primary">v{x.version || "—"}</strong><small className="table-sub">{x.updateStatus === "current" ? "Atualizado" : x.updateStatus || "Não gerenciado"}</small></td><td><strong className="table-primary">{date(x.lastSeen)}</strong><small className="table-sub">IP {x.observedIp || x.inventory?.localIp || "—"}</small></td><td><span className={`pill ${x.blocked ? "offline" : x.health === "online" ? "online" : "offline"}`}>{x.blocked ? "Revogado" : HEALTH_LABEL[x.health || x.status]}</span></td></tr>; })}</tbody></table></div><Pager page={safePage} pageCount={pages} total={filtered.length} onPage={setPage} />
+      {current && <DeviceDetail d={current} person={directory?.people.find(p => p.host === current.id) || null} canManage={canManage} busy={busy === current.id} onToggleBlock={() => toggleBlock(current.id, !current.blocked)} onRemove={() => remove(current.id)} onUpdated={reload} onClose={() => setSelected(null)} />}
     </div>
   );
 }
 function DeviceDetail({
   d,
+  person,
   canManage,
   busy,
   onToggleBlock,
@@ -2988,6 +2999,7 @@ function DeviceDetail({
   onClose,
 }: {
   d: Device;
+  person: DirPerson | null;
   canManage: boolean;
   busy: boolean;
   onToggleBlock: () => void;
@@ -2997,44 +3009,22 @@ function DeviceDetail({
 }) {
   const health = d.blocked ? "offline" : d.health || d.status;
   const [name, setName] = useState(d.name);
+  const [tab, setTab] = useState<"overview" | "collection" | "inventory" | "software" | "manage">("overview");
+  const signalLabels: Record<string, string> = { window: "Aplicativos e janelas", afk: "Atividade/ociosidade", input: "Teclado e mouse", web: "URLs e navegador", screenshots: "Capturas de tela", heartbeat: "Saúde do agente" };
   async function update(patch: object) { const response = await fetch("/platform-api/dashboard/devices/update", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify({ host: d.id, ...patch }) }); if (!response.ok) { const result = await response.json(); alert(result.error === "stable_release_not_published" ? `Publique primeiro uma versão estável para ${result.platform}.` : "Não foi possível atualizar o dispositivo."); return; } onUpdated(); }
   return (
-    <article className={`card device-detail${d.blocked ? " blocked" : ""}`}>
-      <div className="device-icon">⌘</div>
-      <div>
-        <h3>{d.name}</h3>
-        <p>{d.platform} · {d.client || "agente"} · versão {d.version || "desconhecida"} · host {d.id}</p>
-      </div>
+    <article className={`card device-detail device-workspace${d.blocked ? " blocked" : ""}`}>
+      <div className="device-icon">{d.platform === "macOS" ? "⌘" : "▣"}</div>
+      <div><span className="eyebrow">DETALHE DO EQUIPAMENTO</span><h3>{d.name}</h3><p>{d.inventory?.model || d.platform} · {d.personName || "sem responsável"} · host {d.id}</p></div>
       <div className="head-actions"><button className="btn ghost" onClick={onClose}>Fechar</button><span className={`pill ${d.blocked ? "offline" : health === "online" ? "online" : "offline"}`}>
         {d.blocked ? "revogado" : HEALTH_LABEL[health] || d.status}
       </span></div>
-      <dl>
-        <div>
-          <dt>Sincronização</dt>
-          <dd>{date(d.lastSeen)}</dd>
-        </div>
-        <div>
-          <dt>IP observado</dt>
-          <dd>{d.observedIp || d.inventory?.localIp || "Aguardando sinal"}</dd>
-        </div>
-        <div>
-          <dt>Equipamento</dt>
-          <dd>{d.inventory?.model || d.inventory?.architecture || "Aguardando inventário"}</dd>
-        </div>
-        <div>
-          <dt>Pessoa vinculada</dt>
-          <dd>{d.personName || "Não vinculado"}</dd>
-        </div>
-        <div>
-          <dt>Usuário da sessão</dt>
-          <dd>{d.inventory?.sessionUser || "Aguardando agente atualizado"}</dd>
-        </div>
-      </dl>
-      {(d.inventory?.os || d.inventory?.memoryGB) && <p className="device-inventory">{d.inventory?.os} {d.inventory?.osVersion} · {d.inventory?.architecture} · {d.inventory?.memoryGB ? `${d.inventory.memoryGB} GB RAM` : ""}</p>}
-      <div className={`device-update-state ${d.updateStatus || "unmanaged"}`}><strong>Atualização do agente</strong><span>Atual: {d.version || "desconhecida"}</span><span>Estável: {d.targetVersion || "não publicada"}</span><span>Estado: {d.updateStatus || "não gerenciado"}</span><span>Última consulta: {d.lastUpdateCheckAt ? date(d.lastUpdateCheckAt) : "aguardando"}</span>{d.updateError && <em>{d.updateError}</em>}</div>
-      <div className="device-signals"><strong>Sinais coletados</strong>{Object.keys(d.signals || {}).length ? Object.entries(d.signals || {}).map(([kind, timestamp]) => <span key={kind}>{kind}: {date(timestamp)}</span>) : <span>Aguardando sinais do agente.</span>}</div>
-      <div className="device-software"><strong>Softwares instalados ({d.software?.length || 0})</strong>{d.software?.length ? <div>{d.software.slice(0, 30).map(item => <span key={item}>{item}</span>)}</div> : <p>Aguardando inventário do agente.</p>}</div>
-      {canManage && (
+      <nav className="device-tabs"><button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}>Visão geral</button><button className={tab === "collection" ? "active" : ""} onClick={() => setTab("collection")}>Coleta</button><button className={tab === "inventory" ? "active" : ""} onClick={() => setTab("inventory")}>Inventário</button><button className={tab === "software" ? "active" : ""} onClick={() => setTab("software")}>Softwares</button>{canManage && <button className={tab === "manage" ? "active" : ""} onClick={() => setTab("manage")}>Gerenciar</button>}</nav>
+      {tab === "overview" && <div className="device-panel"><div className="device-summary-grid"><div><span>Responsável</span><strong>{d.personName || "Não vinculado"}</strong><small>{d.personEmail || d.inventory?.sessionUser || "Sem identidade"}</small></div><div><span>Última sincronização</span><strong>{date(d.lastSeen)}</strong><small>{d.health === "online" ? "Recebendo dados agora" : "Coleta interrompida"}</small></div><div><span>Uso monitorado</span><strong>{duration(person?.trackedSeconds || 0)}</strong><small>{duration(person?.activeSeconds || 0)} ativo</small></div><div><span>Web e interação</span><strong>{duration(person?.webSeconds || 0)}</strong><small>{(person?.presses || 0).toLocaleString("pt-BR")} teclas · {(person?.clicks || 0).toLocaleString("pt-BR")} cliques</small></div></div><div className="device-health-callout"><span className={`health-orb ${health}`}/><div><strong>{health === "online" ? "Equipamento coletando normalmente" : "Equipamento precisa de atenção"}</strong><p>{Object.keys(d.signals || {}).length} de 6 tipos de sinal identificados · agente v{d.version || "desconhecida"} · {d.updateStatus === "current" ? "versão atual" : d.updateStatus || "versão não gerenciada"}</p></div></div></div>}
+      {tab === "collection" && <div className="device-panel"><div className="collection-grid">{Object.entries(signalLabels).map(([key, label]) => { const timestamp = d.signals?.[key]; return <div className={timestamp ? "ok" : "missing"} key={key}><span className="signal-dot"/><div><strong>{label}</strong><small>{timestamp ? `Último envio ${date(timestamp)}` : "Nenhum sinal no período"}</small></div><em>{timestamp ? "Ativo" : "Pendente"}</em></div>; })}</div><div className="collection-notes"><strong>Integridade da coleta</strong><p>Os horários representam o último dado recebido por sensor. Ausência de um sinal pode indicar permissão do sistema operacional, navegador sem atividade ou módulo desativado.</p></div></div>}
+      {tab === "inventory" && <div className="device-panel"><dl className="inventory-grid"><div><dt>Hostname</dt><dd>{d.id}</dd></div><div><dt>Usuário da sessão</dt><dd>{d.inventory?.sessionUser || "Não identificado"}</dd></div><div><dt>IP público observado</dt><dd>{d.observedIp || "—"}</dd></div><div><dt>IP local</dt><dd>{d.inventory?.localIp || "—"}</dd></div><div><dt>Sistema operacional</dt><dd>{d.inventory?.os || d.platform} {d.inventory?.osVersion}</dd></div><div><dt>Modelo</dt><dd>{d.inventory?.model || "Aguardando inventário"}</dd></div><div><dt>Arquitetura</dt><dd>{d.inventory?.architecture || "—"}</dd></div><div><dt>Memória</dt><dd>{d.inventory?.memoryGB ? `${d.inventory.memoryGB} GB` : "—"}</dd></div></dl></div>}
+      {tab === "software" && <div className="device-panel device-software"><div className="software-head"><div><strong>Softwares instalados</strong><p>Inventário informado pelo agente para diagnóstico e conformidade.</p></div><span>{d.software?.length || 0} itens</span></div>{d.software?.length ? <div className="software-grid">{d.software.map(item => <span key={item}>{item}</span>)}</div> : <State text="Aguardando o próximo inventário de software." />}</div>}
+      {tab === "manage" && canManage && (
         <div className="device-actions">
           <button
             className={d.blocked ? "btn" : "btn ghost danger"}
@@ -3048,6 +3038,7 @@ function DeviceDetail({
                 : "Revogar acesso"}
           </button>
           <div className="device-inline-edit"><input value={name} onChange={e => setName(e.target.value)} /><button className="btn ghost" onClick={() => update({ name })}>Renomear</button><button className="btn ghost" onClick={() => update({ requestUpdate: true })}>{d.updateRequested ? "Atualização solicitada" : "Solicitar atualização"}</button><button className="btn ghost danger" disabled={busy} onClick={onRemove}>Remover agente</button></div>
+          <div className={`device-update-state ${d.updateStatus || "unmanaged"}`}><strong>Atualização remota</strong><span>Atual: {d.version || "desconhecida"}</span><span>Alvo: {d.targetVersion || "não publicado"}</span><span>Estado: {d.updateStatus || "não gerenciado"}</span><span>Consulta: {d.lastUpdateCheckAt ? date(d.lastUpdateCheckAt) : "aguardando"}</span>{d.updateError && <em>{d.updateError}</em>}</div>
         </div>
       )}
     </article>

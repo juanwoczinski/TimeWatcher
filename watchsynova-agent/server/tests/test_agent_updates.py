@@ -43,6 +43,14 @@ class AgentUpdateTests(unittest.TestCase):
         self.assertEqual(report["distribution"], {"0.4.0": 1, "0.3.0": 1})
         self.assertEqual(report["statuses"]["outdated"], 1)
 
+    def test_activity_signal_does_not_erase_device_inventory(self):
+        config = server.default_config()
+        server.register_device_signal(config, "synova", "mac.local", "agent/0.4.0", "0.4.0", {"os": "Darwin", "model": "Mac17,2", "installedSoftware": ["TimeWatcher"]}, "203.0.113.10")
+        server.register_device_signal(config, "synova", "mac.local", "window-watcher", "", None, "203.0.113.10")
+        device = config["devices"]["synova:mac.local"]
+        self.assertEqual(device["inventory"]["model"], "Mac17,2")
+        self.assertEqual(device["software"], ["TimeWatcher"])
+
 
 if __name__ == "__main__":
     unittest.main()

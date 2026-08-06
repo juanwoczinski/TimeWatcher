@@ -1023,6 +1023,12 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
     is_manager = current_viewer["role"] == "manager" and scope != "self"
     managed = managed_team_ids(config, current_viewer.get("email", ""), tenant_id) if is_manager else set()
     rules = classification_rules(config, tenant_id)
+    accounts = {email.lower(): account for email, account in config.get("accounts", {}).items() if account.get("tenantId") == tenant_id and account.get("status", "active") == "active"}
+    org_people = [person.copy() for person in config.get("people", []) if person.get("tenantId") == tenant_id]
+    known_emails = {(person.get("email") or "").lower() for person in org_people if person.get("email")}
+    for email, account in accounts.items():
+        if email not in known_emails:
+            org_people.append({"id": "account-" + hashlib.sha256(email.encode()).hexdigest()[:12], "tenantId": tenant_id, "name": account.get("name") or email.split("@", 1)[0], "email": email, "title": "Usuário da plataforma", "accessRole": account.get("role")})
 
     hosts: dict = {}
     for bucket_id, bucket in buckets.items():
@@ -1043,8 +1049,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
         return aw_get(f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}/events?{query}")
 
     meta_by_key: dict = {}
-    for person in config.get("people", []):
-        if person.get("tenantId") != tenant_id: continue
+    for person in org_people:
         meta_by_key[canonical_host(person.get("host")) if person.get("host") else person.get("id")] = person
 
     people = []; used_person_ids: set = set()
@@ -1098,6 +1103,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
             "id": meta.get("id") or pid, "host": host,
             "name": meta.get("name") or host.replace(".local", ""),
             "title": meta.get("title") or "Colaborador",
+            "accessRole": (accounts.get((meta.get("email") or "").lower()) or {}).get("role") or meta.get("accessRole"),
             "teamId": meta.get("teamId"), "ouId": meta.get("ouId") or meta.get("teamId"), "scheduleId": meta.get("scheduleId"),
             "email": meta.get("email"), "licenseType": meta.get("licenseType"), "registered": bool(meta), "hasTelemetry": True,
             "device": host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop",
@@ -1114,13 +1120,13 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
             "recentActivity": recent_activity[:40],
         })
     # registered people without telemetry (or not yet linked to a host) still belong in the roster
-    for person in config.get("people", []):
-        if person.get("tenantId") != tenant_id or person.get("id") in used_person_ids: continue
+    for person in org_people:
+        if person.get("id") in used_person_ids: continue
         if is_manager and person.get("teamId") not in managed: continue
         host = person.get("host")
         people.append({
             "id": person["id"], "host": host,
-            "name": person.get("name") or person["id"], "title": person.get("title") or "Colaborador",
+            "name": person.get("name") or person["id"], "title": person.get("title") or "Colaborador", "accessRole": (accounts.get((person.get("email") or "").lower()) or {}).get("role") or person.get("accessRole"),
             "teamId": person.get("teamId"), "ouId": person.get("ouId") or person.get("teamId"), "scheduleId": person.get("scheduleId"),
             "email": person.get("email"), "licenseType": person.get("licenseType"), "registered": True, "hasTelemetry": False,
             "device": (host or "").replace(".local", "") or "—", "platform": "—",
@@ -1139,7 +1145,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
         "range": {"start": start.isoformat(), "end": end.isoformat()}, "people": people,
         "schedules": [s for s in config["schedules"] if s["tenantId"] == tenant_id],
         "teams": [t for t in config.get("teams", []) if t.get("tenantId") == tenant_id],
-        "counts": {"people": len(people), "online": sum(1 for p in people if p["status"] == "online")},
+        "counts": {"people": len(people), "online": sum(1 for p in people if p["status"] == "online"), "withDevice": sum(1 for p in people if p.get("host")), "withoutDevice": sum(1 for p in people if not p.get("host")), "withAccess": sum(1 for p in people if p.get("accessRole"))},
     }
 
 
@@ -2464,9 +2470,9 @@ class Handler(BaseHTTPRequestHandler):
                 if not device_allowed(config, tenant_id, hostname): return self.send_json(403, {"error": "device_limit_reached"})
                 signal = next((e.get("data", {}) for e in reversed(clean) if isinstance(e.get("data"), dict) and (e.get("data", {}).get("version") or e.get("data", {}).get("device"))), {})
                 version = str(signal.get("version", ""))
-                inventory = signal.get("device") if isinstance(signal.get("device"), dict) else {}
+                inventory = signal.get("device") if isinstance(signal.get("device"), dict) else None
                 register_device_signal(config, tenant_id, hostname, str(bucket.get("client", "")), version, inventory, client_ip(self.headers))
-                linked = auto_link_device_identity(config, tenant_id, hostname, inventory)
+                linked = auto_link_device_identity(config, tenant_id, hostname, inventory or {})
                 if linked:
                     audit("device.auto_link", "system", {"tenant": tenant_id, "host": hostname, "personId": linked["id"]})
                 save_config(config)
