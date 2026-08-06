@@ -17,6 +17,7 @@ type Section =
   | "Pessoas"
   | "OUs"
   | "Alertas"
+  | "Operações"
   | "Intelligence"
   | "Dispositivos"
   | "Atividades"
@@ -95,6 +96,9 @@ type Schedule = {
   end: string;
   breakMinutes: number;
   weekdays: number[];
+  timezone?: string;
+  holidays?: string[];
+  exceptions?: Record<string, { off?: boolean; start?: string; end?: string }>;
 };
 type Tenant = {
   id: string;
@@ -197,6 +201,7 @@ const baseNav: { name: Section; icon: IconName }[] = [
   { name: "Pessoas", icon: "people" },
   { name: "OUs", icon: "teams" },
   { name: "Alertas", icon: "alerts" },
+  { name: "Operações", icon: "alerts" },
   { name: "Intelligence", icon: "intelligence" },
   { name: "Dispositivos", icon: "devices" },
   { name: "Atividades", icon: "activity" },
@@ -212,6 +217,7 @@ const desc: Record<Section, string> = {
   Pessoas: "Jornada, atividade, ativos e capturas por colaborador.",
   OUs: "Unidades organizacionais (com hierarquia pai/filha) e o gestor de cada uma.",
   Alertas: "Agente offline, ociosidade longa e desvios de jornada.",
+  Operações: "Logs, métricas de ingestão, saúde dos serviços e alertas operacionais.",
   Intelligence: "Pergunte sobre a operação e receba síntese apoiada nos dados.",
   Dispositivos: "Inventário e saúde dos computadores vinculados.",
   Atividades: "Aplicativos, URLs, janelas, atividade e ociosidade.",
@@ -711,7 +717,7 @@ function Dashboard() {
     if (isMember) return n.name === "Visão geral" || n.name === "Atividades";
     if (n.name === "Empresas") return data?.viewer.role === "super_admin";
     if (n.name === "Acessos" || n.name === "Faturamento") return isAdmin;
-    if (n.name === "OUs" || n.name === "Alertas" || n.name === "Intelligence")
+    if (n.name === "OUs" || n.name === "Alertas" || n.name === "Operações" || n.name === "Intelligence")
       return isAdmin || data?.viewer.role === "manager";
     return true;
   });
@@ -959,6 +965,7 @@ function Content({
   if (active === "Pessoas") return <People d={data} reload={reload} />;
   if (active === "OUs") return <Teams d={data} />;
   if (active === "Alertas") return <Alerts d={data} />;
+  if (active === "Operações") return <Operations d={data} />;
   if (active === "Intelligence") return <Intelligence d={data} go={setActive} />;
   if (active === "Dispositivos") return <Devices d={data} reload={reload} />;
   if (active === "Atividades") return <Activities d={data} />;
@@ -1925,6 +1932,7 @@ type BillingData = {
   poolEditable: boolean;
   features: { intelligence: boolean };
   plans: { id: string; name: string; price: number; features: string[] }[];
+  limits: { people: number; devices: number; retentionDays: number };
 };
 const brl = (n: number) =>
   n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
@@ -1933,6 +1941,8 @@ function Billing({ d }: { d: Data }) {
   const [b, setB] = useState<BillingData | null>(null);
   const [essential, setEssential] = useState("");
   const [intelligence, setIntelligence] = useState("");
+  const [peopleLimit, setPeopleLimit] = useState("");
+  const [deviceLimit, setDeviceLimit] = useState("");
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const load = useCallback(async () => {
@@ -1944,6 +1954,7 @@ function Billing({ d }: { d: Data }) {
       setB(x);
       setEssential(String(x.pool.essential));
       setIntelligence(String(x.pool.intelligence));
+      setPeopleLimit(String(x.limits.people)); setDeviceLimit(String(x.limits.devices));
     }
   }, []);
   useEffect(() => {
@@ -2039,6 +2050,7 @@ function Billing({ d }: { d: Data }) {
           </button>
         )}
       </article>
+      {b.poolEditable && <article className="card inline-form"><div><h2>Limites do tenant</h2><p>Controle de capacidade contratada e retenção.</p></div><label>Pessoas<input type="number" min="0" value={peopleLimit} onChange={e => setPeopleLimit(e.target.value)} /></label><label>Dispositivos<input type="number" min="0" value={deviceLimit} onChange={e => setDeviceLimit(e.target.value)} /></label><button className="primary" onClick={() => update({ limits: { people: Number(peopleLimit) || 0, devices: Number(deviceLimit) || 0, retentionDays: b.limits.retentionDays } })}>Salvar limites</button></article>}
       <div className="plan-grid">
         {b.plans.map((pl) => (
           <article
@@ -2442,6 +2454,16 @@ const ALERT_LABEL: Record<string, string> = {
   long_idle: "Ociosidade longa",
   low_adherence: "Baixa aderência",
 };
+function Operations({ d }: { d: Data }) {
+  const [op, setOp] = useState<any>(null);
+  useEffect(() => { fetch("/platform-api/dashboard/operations", { credentials: "same-origin", cache: "no-store" }).then(r => r.ok ? r.json() : null).then(setOp).catch(() => {}); }, []);
+  if (!op) return <State text="Carregando saúde operacional…" />;
+  return <div className="page-stack">
+    <div className="section-summary"><strong>Saúde operacional</strong><span>Ingestão, armazenamento, agentes e trilha administrativa em tempo real.</span></div>
+    <div className="metric-grid"><Metric label="Buckets ativos" value={String(op.ingest.buckets)} note={`${op.ingest.hosts} dispositivos identificados`} /><Metric label="Serviço de ingestão" value="Online" note="API recebendo eventos" /><Metric label="Alertas abertos" value={String(op.alerts.counts.total)} note={`${op.alerts.counts.critical} críticos`} /></div>
+    <article className="card"><div className="card-head"><div><h2>Logs administrativos</h2><p>Últimas ações administrativas auditadas</p></div></div><div className="activity-feed">{(op.audit || []).map((e: any, i: number) => <div className="activity-row" key={i}><span className="activity-time">{date(e.ts)}</span><span className="activity-what"><strong>{e.action}</strong> · {e.actor}</span><span className="activity-dur">OK</span></div>)}</div></article>
+  </div>;
+}
 function Alerts({ d }: { d: Data }) {
   void d;
   const [ad, setAd] = useState<{
@@ -3449,6 +3471,7 @@ function Settings({ d, prefs }: { d: Data; prefs: Prefs }) {
         </div>
       </article>
       <Policies d={d} />
+      <ScheduleAdmin d={d} />
       <article className="card">
         <h2>Coleta</h2>
         <dl className="settings-list">
@@ -3485,6 +3508,11 @@ function Settings({ d, prefs }: { d: Data; prefs: Prefs }) {
       </article>
     </div>
   );
+}
+function ScheduleAdmin({ d }: { d: Data }) {
+  const [name, setName] = useState(""); const [start, setStart] = useState("09:00"); const [end, setEnd] = useState("18:00"); const [tz, setTz] = useState("America/Sao_Paulo"); const [holidays, setHolidays] = useState(""); const [saved, setSaved] = useState(false);
+  async function save() { if (!name.trim()) return; await fetch("/platform-api/dashboard/schedules", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify({ name, start, end, timezone: tz, holidays: holidays.split(/[,\n]/).map(x => x.trim()).filter(Boolean), weekdays: [1,2,3,4,5], breakMinutes: 60 }) }); setName(""); setSaved(true); setTimeout(() => setSaved(false), 2000); }
+  return <article className="card"><div className="card-head"><div><h2>Jornadas da empresa</h2><p>Configure horário, fuso e feriados; depois atribua em Pessoas.</p></div>{saved && <span className="saved-flag">Salvo ✓</span>}</div><div className="person-edit"><label>Nome<input value={name} onChange={e => setName(e.target.value)} placeholder="Comercial · São Paulo" /></label><label>Início<input type="time" value={start} onChange={e => setStart(e.target.value)} /></label><label>Fim<input type="time" value={end} onChange={e => setEnd(e.target.value)} /></label><label>Fuso horário<input value={tz} onChange={e => setTz(e.target.value)} /></label><label>Feriados (AAAA-MM-DD)<input value={holidays} onChange={e => setHolidays(e.target.value)} placeholder="2026-09-07, 2026-12-25" /></label><button className="primary" onClick={save}>Criar jornada</button></div><div className="activity-feed">{d.schedules.map(s => <div className="activity-row" key={s.id}><span className="activity-what"><strong>{s.name}</strong> · {s.start}–{s.end} · {s.timezone || "America/Sao_Paulo"}</span><span className="activity-dur">{(s.holidays || []).length} feriado(s)</span></div>)}</div></article>;
 }
 function Users({ d }: { d: Data }) {
   const [email, setEmail] = useState("");

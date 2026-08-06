@@ -188,10 +188,11 @@ def billing_summary(config: dict, tenant_id: str) -> dict:
     used = {"essential": sum(1 for p in people if p.get("licenseType") == "essential"),
             "intelligence": sum(1 for p in people if p.get("licenseType") == "intelligence")}
     monthly = round(pool["essential"] * prices["essential"] + pool["intelligence"] * prices["intelligence"], 2)
+    limits = billing.get("limits") or {"people": pool["essential"] + pool["intelligence"], "devices": 0, "retentionDays": retention_days()}
     return {
         "pool": pool, "used": used, "prices": prices, "status": billing.get("status", "trial"),
         "cycleStart": billing.get("cycleStart"), "monthlyTotal": monthly,
-        "features": {"intelligence": pool["intelligence"] > 0},
+        "features": {"intelligence": pool["intelligence"] > 0}, "limits": {"people": int(limits.get("people", 0) or 0), "devices": int(limits.get("devices", 0) or 0), "retentionDays": int(limits.get("retentionDays", 0) or 0)},
         "plans": [
             {"id": "essential", "name": "Essential", "price": prices["essential"], "features": ["Monitoramento e capturas", "Pessoas, OUs e gestor", "Relatórios e exportações", "Alertas em tempo real"]},
             {"id": "intelligence", "name": "Intelligence", "price": prices["intelligence"], "features": ["Tudo do Essential", "Entra na análise de IA", "Perguntas em linguagem natural", "Resumos e recomendações"]},
@@ -463,15 +464,23 @@ def schedule_windows(schedule: dict | None, start: datetime, end: datetime) -> l
         pause = max(0, int(schedule.get("breakMinutes", 0))) * 60
     except (TypeError, ValueError):
         return []
+    try: local_zone = ZoneInfo(str(schedule.get("timezone") or os.environ.get("TIMEWATCHER_TIMEZONE", "America/Sao_Paulo")))
+    except Exception: local_zone = LOCAL_TIMEZONE
     weekdays = {int(day) for day in (schedule.get("weekdays") or [1, 2, 3, 4, 5])}
-    local_start = start.astimezone(LOCAL_TIMEZONE).date()
-    local_end = end.astimezone(LOCAL_TIMEZONE).date()
+    holidays = {str(day)[:10] for day in (schedule.get("holidays") or [])}
+    exceptions = schedule.get("exceptions") or {}
+    local_start = start.astimezone(local_zone).date()
+    local_end = end.astimezone(local_zone).date()
     windows = []
     cursor = local_start
     while cursor <= local_end:
-        if cursor.isoweekday() in weekdays:
-            ws = datetime(cursor.year, cursor.month, cursor.day, sh, sm, tzinfo=LOCAL_TIMEZONE)
-            we = datetime(cursor.year, cursor.month, cursor.day, eh, em, tzinfo=LOCAL_TIMEZONE)
+        override = exceptions.get(cursor.isoformat()) if isinstance(exceptions, dict) else None
+        if cursor.isoformat() not in holidays and cursor.isoweekday() in weekdays and not (isinstance(override, dict) and override.get("off")):
+            start_hm = override.get("start", schedule.get("start", "09:00")) if isinstance(override, dict) else schedule.get("start", "09:00")
+            end_hm = override.get("end", schedule.get("end", "18:00")) if isinstance(override, dict) else schedule.get("end", "18:00")
+            sh2, sm2 = (int(x) for x in str(start_hm).split(":")[:2]); eh2, em2 = (int(x) for x in str(end_hm).split(":")[:2])
+            ws = datetime(cursor.year, cursor.month, cursor.day, sh2, sm2, tzinfo=local_zone)
+            we = datetime(cursor.year, cursor.month, cursor.day, eh2, em2, tzinfo=local_zone)
             if we <= ws:  # overnight shifts are supported without ambiguity
                 we += timedelta(days=1)
             # Deduct the configured interval from the end; this keeps expected
@@ -1313,6 +1322,19 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/dashboard/invites":
             if not self.authorized_admin(current): return self.send_json(403, {"error": "forbidden"})
             return self.list_invites(current)
+        if parsed.path == "/dashboard/schedules":
+            config = load_config(); tid = params.get("tenant", [current["tenantId"]])[0] if current["role"] == "super_admin" else current["tenantId"]
+            return self.send_json(200, {"schedules": [s for s in config.get("schedules", []) if s.get("tenantId") == tid], "holidays": sorted({h for s in config.get("schedules", []) if s.get("tenantId") == tid for h in (s.get("holidays") or [])})})
+        if parsed.path == "/dashboard/operations":
+            if current["role"] not in ("super_admin", "org_admin", "manager"): return self.send_json(403, {"error": "forbidden"})
+            config = load_config(); tid = current["tenantId"]
+            buckets = aw_get("/api/0/buckets/")
+            tenant_buckets = [b for b in buckets.values() if b.get("hostname")]
+            recent = []
+            try:
+                for line in AUDIT_FILE.read_text(encoding="utf-8").splitlines()[-100:]: recent.append(json.loads(line))
+            except (OSError, json.JSONDecodeError): pass
+            return self.send_json(200, {"generatedAt": datetime.now(timezone.utc).isoformat(), "ingest": {"buckets": len(tenant_buckets), "hosts": len({b.get('hostname') for b in tenant_buckets}), "lastEvent": max((b.get('last_updated') or b.get('created') or '' for b in tenant_buckets), default=None)}, "alerts": compute_alerts(current), "audit": list(reversed(recent[-50:])), "services": {"ingest": "online", "activityStore": "online", "dashboard": "online"}})
         if parsed.path == "/dashboard/audit":
             if current["role"] != "super_admin": return self.send_json(403, {"error": "forbidden"})
             return self.list_audit()
@@ -1408,8 +1430,9 @@ class Handler(BaseHTTPRequestHandler):
                     if sent.get("ok"): audit("invite.email_sent", current["email"], {"email": email})
                     return self.send_json(201, {"email": email, "role": role, "inviteUrl": invite_url, "emailSent": bool(sent.get("ok"))})
                 if parsed.path == "/dashboard/schedules":
-                    schedule = {"id": payload.get("id") or str(uuid.uuid4()), "tenantId": current["tenantId"], "name": str(payload.get("name", "Jornada"))[:80], "start": str(payload.get("start", "09:00"))[:5], "end": str(payload.get("end", "18:00"))[:5], "breakMinutes": max(0, int(payload.get("breakMinutes", 60))), "weekdays": payload.get("weekdays", [1,2,3,4,5])}
-                    config["schedules"] = [s for s in config["schedules"] if s["id"] != schedule["id"]] + [schedule]; save_config(config); return self.send_json(201, schedule)
+                    s_tenant = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
+                    schedule = {"id": payload.get("id") or str(uuid.uuid4()), "tenantId": s_tenant, "name": str(payload.get("name", "Jornada"))[:80], "start": str(payload.get("start", "09:00"))[:5], "end": str(payload.get("end", "18:00"))[:5], "breakMinutes": max(0, int(payload.get("breakMinutes", 60))), "weekdays": payload.get("weekdays", [1,2,3,4,5]), "timezone": str(payload.get("timezone", "America/Sao_Paulo")), "holidays": [str(x)[:10] for x in (payload.get("holidays") or [])][:500], "exceptions": payload.get("exceptions") if isinstance(payload.get("exceptions"), dict) else {}}
+                    config["schedules"] = [s for s in config["schedules"] if not (s["id"] == schedule["id"] and s.get("tenantId") == s_tenant)] + [schedule]; save_config(config); audit("schedule.upsert", current["email"], {"id": schedule["id"], "tenantId": s_tenant}); return self.send_json(201, schedule)
                 if parsed.path == "/dashboard/people/schedule":
                     ids = payload.get("personIds", []); schedule_id = payload.get("scheduleId")
                     for person in config["people"]:
@@ -1555,6 +1578,12 @@ class Handler(BaseHTTPRequestHandler):
                         for key in ("essential", "intelligence"):
                             if key in payload["prices"]:
                                 try: pricing[key] = round(float(payload["prices"][key]), 2)
+                                except (TypeError, ValueError): pass
+                    if isinstance(payload.get("limits"), dict):
+                        limits = billing.setdefault("limits", {})
+                        for key in ("people", "devices", "retentionDays"):
+                            if key in payload["limits"]:
+                                try: limits[key] = max(0, min(1000000, int(payload["limits"][key])))
                                 except (TypeError, ValueError): pass
                     save_config(config); audit("billing.update", current["email"], {"tenant": b_tenant, "pool": billing.get("pool")})
                     return self.send_json(200, billing_summary(config, b_tenant))
