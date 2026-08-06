@@ -23,6 +23,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import mailer
+import store
+
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_AVATAR_BYTES = 3 * 1024 * 1024
 DATA_DIR = Path(os.environ.get("WATCHSYNOVA_DATA_DIR", "/var/lib/watchsynova-ingest"))
@@ -66,22 +69,23 @@ def default_config() -> dict:
     }
 
 
-def load_config() -> dict:
+def _read_config_file() -> dict | None:
     if not CONFIG_FILE.exists():
-        config = default_config()
-        save_config(config)
-        return config
+        return None
     try:
-        config = json.loads(CONFIG_FILE.read_text())
-        baseline = default_config()
-        for key, value in baseline.items():
-            config.setdefault(key, value)
-        return config
+        return json.loads(CONFIG_FILE.read_text())
     except (OSError, json.JSONDecodeError):
-        return default_config()
+        return None
 
 
-def save_config(config: dict) -> None:
+def _with_baseline(config: dict) -> dict:
+    baseline = default_config()
+    for key, value in baseline.items():
+        config.setdefault(key, value)
+    return config
+
+
+def _save_config_file(config: dict) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=DATA_DIR, delete=False) as temporary:
         json.dump(config, temporary, ensure_ascii=False, indent=2)
@@ -90,6 +94,29 @@ def save_config(config: dict) -> None:
         temporary_path = Path(temporary.name)
     temporary_path.chmod(0o600)
     temporary_path.replace(CONFIG_FILE)
+
+
+def load_config() -> dict:
+    if store.db_enabled():
+        config = store.db_load()
+        if config is None:  # first boot on the DB: seed from the existing file
+            config = _with_baseline(_read_config_file() or default_config())
+            store.db_save(config)
+            return config
+        return _with_baseline(config)
+    config = _read_config_file()
+    if config is None:
+        config = default_config()
+        save_config(config)
+        return config
+    return _with_baseline(config)
+
+
+def save_config(config: dict) -> None:
+    if store.db_enabled():
+        store.db_save(config)
+        return
+    _save_config_file(config)
 
 
 def aw_request(method: str, path: str, payload: object) -> None:
@@ -451,6 +478,10 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     if current_viewer["role"] == "manager":
         allowed_hosts = manager_hosts(config, current_viewer.get("email", ""), tenant_id)
         buckets = {key: value for key, value in buckets.items() if value.get("hostname") in allowed_hosts}
+    elif current_viewer["role"] in ("member", "employee"):
+        mine = member_person(config, current_viewer)
+        my_host = mine.get("host") if mine else None
+        buckets = {key: value for key, value in buckets.items() if my_host and value.get("hostname") == my_host}
     rules = classification_rules(config, tenant_id)
     window_buckets = [(key, value) for key, value in buckets.items() if value.get("type") == "currentwindow"]
     afk_buckets = [(key, value) for key, value in buckets.items() if value.get("type") == "afkstatus"]
@@ -546,7 +577,8 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
         return "online" if age < 300 else "stale" if age < 3600 else "offline"
     devices = [{"id": host, "name": host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop", "lastSeen": seen.isoformat(), "status": "online" if (end - seen).total_seconds() < 300 else "offline", "health": device_health(seen), "client": clients_by_host.get(host), "blocked": host in blocked_hosts, "trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "presses": presses, "clicks": clicks, "signals": {name: timestamp.isoformat() for name, timestamp in signals_by_host.get(host, {}).items()}} for host, seen in sorted(devices_by_host.items())]
     _managed = managed_team_ids(config, current_viewer.get("email", ""), tenant_id) if current_viewer["role"] == "manager" else None
-    people = [person.copy() for person in config["people"] if person["tenantId"] == tenant_id and (_managed is None or person.get("teamId") in _managed)]
+    _member = member_person(config, current_viewer) if current_viewer["role"] in ("member", "employee") else None
+    people = [person.copy() for person in config["people"] if person["tenantId"] == tenant_id and (_managed is None or person.get("teamId") in _managed) and (_member is None or person.get("id") == _member.get("id"))]
     if people:
         people[0]["deviceIds"] = [d["id"] for d in devices]
     productive = category_seconds["productive"]
@@ -593,6 +625,15 @@ def manager_hosts(config: dict, email: str, tenant_id: str) -> set:
     """Telemetry hosts a manager may see (people assigned to their teams)."""
     team_ids = managed_team_ids(config, email, tenant_id)
     return {p.get("host") for p in config.get("people", []) if p.get("tenantId") == tenant_id and p.get("teamId") in team_ids and p.get("host")}
+
+
+def member_person(config: dict, viewer: dict) -> dict | None:
+    """The person a logged-in member IS (matched by e-mail), for self-only views."""
+    email = (viewer.get("email") or "").lower()
+    for person in config.get("people", []):
+        if person.get("tenantId") == viewer.get("tenantId") and (person.get("email") or "").lower() == email:
+            return person
+    return None
 
 
 def host_blocked(tenant_id: str, host: str) -> bool:
@@ -707,6 +748,9 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
             "trackedSeconds": 0, "activeSeconds": 0, "idleSeconds": 0, "productiveSeconds": 0, "focusScore": 0,
             "presses": 0, "clicks": 0, "topApps": [], "topUrls": [], "recentActivity": [],
         })
+    if current_viewer["role"] in ("member", "employee"):
+        me = (current_viewer.get("email") or "").lower()
+        people = [p for p in people if (p.get("email") or "").lower() == me]
     people.sort(key=lambda person: (person["status"] != "online", person["name"].lower()))
     tenant = next((t for t in config["tenants"] if t["id"] == tenant_id), {"id": tenant_id, "name": tenant_id})
     return {
@@ -716,6 +760,27 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
         "teams": [t for t in config.get("teams", []) if t.get("tenantId") == tenant_id],
         "counts": {"people": len(people), "online": sum(1 for p in people if p["status"] == "online")},
     }
+
+
+def tenant_admin_emails(config: dict, tenant_id: str) -> list:
+    """Active admins of a workspace (recipients for alert/digest e-mails)."""
+    out = []
+    for email, account in config.get("accounts", {}).items():
+        if account.get("status") == "active" and account.get("role") in ("org_admin", "super_admin") and account.get("tenantId") == tenant_id:
+            out.append(email)
+    return out
+
+
+def text_to_email_html(text: str) -> str:
+    """Light, safe conversion of the LLM digest text into e-mail paragraphs."""
+    import html as _html
+    safe = _html.escape(text or "").strip()
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", safe) if b.strip()]
+    parts = []
+    for block in blocks:
+        block = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", block).replace("\n", "<br>")
+        parts.append(f'<p style="margin:0 0 12px;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.65;color:#4a5270">{block}</p>')
+    return "".join(parts) or "<p>—</p>"
 
 
 def compute_alerts(current_viewer: dict) -> dict:
@@ -938,7 +1003,7 @@ def llm_answer(question: str, snapshot: dict) -> str | None:
         model = os.environ.get("TIMEWATCHER_BEDROCK_MODEL", "anthropic.claude-3-haiku-20240307-v1:0")
         client = boto3.client("bedrock-runtime", region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
         prompt = (
-            "Voce e o analista do TeamWatcher, uma plataforma de gestao de produtividade. "
+            "Voce e o analista do TimeWatcher, uma plataforma de gestao de produtividade. "
             "Responda em portugues do Brasil, de forma objetiva e executiva (2 a 4 frases), a pergunta do gestor. "
             "Use SOMENTE os dados do snapshot abaixo; nunca invente numeros, nomes ou fatos. Se o dado nao existir, diga que nao ha base. "
             "Nao ha conteudo digitado nos dados (privacidade/LGPD); nao mencione isso a menos que perguntem.\n\n"
@@ -1034,12 +1099,31 @@ def generate_and_store_digests() -> None:
             ("daily", now_local.date().isoformat(), "Faça um resumo executivo do DIA de hoje da operação, com destaques e 2 a 3 recomendações objetivas."),
             ("weekly", now_local.strftime("%Y-S%V"), "Faça um resumo executivo da SEMANA da operação, com tendência, destaques e 2 a 3 recomendações."),
         ]
+        fresh_keys = []
         for kind, period_key, question in jobs:
             try:
                 text = intelligence_answer(viewer, question)["answer"]
             except Exception:
                 continue
-            store.setdefault(tid, {})[f"{kind}:{period_key}"] = {"kind": kind, "period": period_key, "text": text, "generatedAt": datetime.now(timezone.utc).isoformat()}
+            key = f"{kind}:{period_key}"
+            prev = store.get(tid, {}).get(key) or {}
+            store.setdefault(tid, {})[key] = {"kind": kind, "period": period_key, "text": text, "generatedAt": datetime.now(timezone.utc).isoformat(), "emailedAt": prev.get("emailedAt")}
+            fresh_keys.append(key)
+        # despacho por e-mail: 1x por chave de periodo (nao reenvia; carrega emailedAt)
+        if mailer.enabled():
+            recipients = tenant_admin_emails(config, tid)
+            for key in fresh_keys:
+                entry = store[tid][key]
+                if entry.get("emailedAt") or not recipients:
+                    continue
+                title = "Resumo diário" if entry["kind"] == "daily" else "Resumo semanal"
+                summary_html = text_to_email_html(entry["text"])
+                sent_any = False
+                for recipient in recipients:
+                    if mailer.send_digest(recipient, tenant.get("name", tid), title, summary_html, PUBLIC_URL).get("ok"):
+                        sent_any = True
+                if sent_any:
+                    entry["emailedAt"] = datetime.now(timezone.utc).isoformat()
         entries = store.get(tid, {})
         if len(entries) > 40:
             for old in sorted(entries, key=lambda k: entries[k]["generatedAt"])[:-40]:
@@ -1055,6 +1139,74 @@ def digest_worker() -> None:
         except Exception:
             pass
         time.sleep(6 * 3600)
+
+
+ALERT_MAIL_FILE = DATA_DIR / "alert_mail_state.json"
+_ALERT_MAIL_LOCK = threading.Lock()
+
+
+def _load_alert_mail_state() -> dict:
+    try:
+        return json.loads(ALERT_MAIL_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_alert_mail_state(state: dict) -> None:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        ALERT_MAIL_FILE.write_text(json.dumps(state, ensure_ascii=False))
+    except OSError:
+        pass
+
+
+def dispatch_alert_emails() -> None:
+    """E-mail NEW critical alerts to each workspace's admins (dedup by id/day)."""
+    config = load_config()
+    policy_on = ((config.get("policies") or {}).get("alerts") or {}).get("email", True)
+    if not policy_on:
+        return
+    today = datetime.now(timezone.utc).astimezone(LOCAL_TIMEZONE).date().isoformat()
+    with _ALERT_MAIL_LOCK:
+        state = _load_alert_mail_state()
+    for tenant in config.get("tenants", []):
+        tid = tenant["id"]
+        viewer = {"role": "super_admin", "tenantId": tid, "email": "system", "name": "system", "username": "system"}
+        try:
+            result = compute_alerts(viewer)
+        except Exception:
+            continue
+        critical = [a for a in result["alerts"] if a["severity"] == "critical"]
+        already = set(state.get(tid, {}).get(today, []))
+        fresh = [a for a in critical if a["id"] not in already]
+        if not fresh:
+            continue
+        recipients = tenant_admin_emails(config, tid)
+        if not recipients:
+            continue
+        payload = [{"severity": a["severity"], "title": a["personName"], "detail": a["message"]} for a in fresh]
+        sent_any = False
+        for recipient in recipients:
+            if mailer.send_alerts(recipient, tenant.get("name", tid), payload, PUBLIC_URL).get("ok"):
+                sent_any = True
+        if sent_any:
+            day_ids = list(already) + [a["id"] for a in fresh]
+            state[tid] = {today: day_ids}  # mantem so o dia atual (poda dias antigos)
+    with _ALERT_MAIL_LOCK:
+        _save_alert_mail_state(state)
+
+
+def alert_email_worker() -> None:
+    interval = int(os.environ.get("TIMEWATCHER_ALERT_EMAIL_MINUTES", "60") or "0")
+    if interval <= 0:
+        return
+    while True:
+        try:
+            if mailer.enabled():
+                dispatch_alert_emails()
+        except Exception:
+            pass
+        time.sleep(interval * 60)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1074,9 +1226,12 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlsplit(self.path); params = urllib.parse.parse_qs(parsed.query); current = viewer(self.headers)
         if parsed.path == "/health": return self.send_json(200, {"status": "ok", "version": 3})
         if parsed.path == "/auth/invite": return self.invite_info(params)
+        if parsed.path == "/auth/reset-info": return self.reset_info(params)
         if parsed.path == "/auth/me":
             return self.send_json(200, current) if current else self.send_json(401, {"error": "unauthenticated"})
         if parsed.path.startswith("/dashboard/") and not current: return self.send_json(401, {"error": "unauthenticated"})
+        if current and current["role"] in ("member", "employee") and (parsed.path.startswith("/dashboard/screenshots") or parsed.path in ("/dashboard/teams", "/dashboard/alerts", "/dashboard/billing", "/dashboard/policies", "/dashboard/audit", "/dashboard/digests", "/dashboard/trends", "/dashboard/intelligence", "/dashboard/invites")):
+            return self.send_json(403, {"error": "forbidden"})
         if parsed.path == "/dashboard/invites":
             if not self.authorized_admin(current): return self.send_json(403, {"error": "forbidden"})
             return self.list_invites(current)
@@ -1140,6 +1295,8 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/auth/login": return self.do_login()
         if parsed.path == "/auth/logout": return self.do_logout()
         if parsed.path == "/auth/accept-invite": return self.do_accept_invite()
+        if parsed.path == "/auth/forgot-password": return self.do_forgot_password()
+        if parsed.path == "/auth/reset-password": return self.do_reset_password()
         if parsed.path == "/dashboard/avatar":
             if not current: return self.send_json(401, {"error": "unauthenticated"})
             return self.receive_avatar(current)
@@ -1157,12 +1314,17 @@ class Handler(BaseHTTPRequestHandler):
                     else: role = "member"
                     if "@" not in email or len(email) > 200: return self.send_json(400, {"error": "invalid_email"})
                     if config["accounts"].get(email, {}).get("status") == "active": return self.send_json(409, {"error": "account_exists"})
+                    inv_tenant = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
                     token = secrets.token_urlsafe(32); now = datetime.now(timezone.utc)
-                    invite = {"email": email, "role": role, "tenantId": current["tenantId"], "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "createdAt": now.isoformat(), "expiresAt": (now + timedelta(days=7)).isoformat()}
+                    invite = {"email": email, "role": role, "tenantId": inv_tenant, "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "createdAt": now.isoformat(), "expiresAt": (now + timedelta(days=7)).isoformat()}
                     config["invites"] = [i for i in config["invites"] if i.get("email") != email] + [invite]; save_config(config)
-                    audit("invite.create", current["email"], {"email": email, "role": role})
+                    audit("invite.create", current["email"], {"email": email, "role": role, "tenantId": inv_tenant})
                     host = self.headers.get("Host") or urllib.parse.urlsplit(PUBLIC_URL).netloc
-                    return self.send_json(201, {"email": email, "role": role, "inviteUrl": f"https://{host}/?invite={token}"})
+                    invite_url = f"https://{host}/?invite={token}"
+                    tenant_name = next((t.get("name") for t in config.get("tenants", []) if t.get("id") == inv_tenant), "")
+                    sent = mailer.send_invite(email, role, invite_url, tenant_name or "")
+                    if sent.get("ok"): audit("invite.email_sent", current["email"], {"email": email})
+                    return self.send_json(201, {"email": email, "role": role, "inviteUrl": invite_url, "emailSent": bool(sent.get("ok"))})
                 if parsed.path == "/dashboard/schedules":
                     schedule = {"id": payload.get("id") or str(uuid.uuid4()), "tenantId": current["tenantId"], "name": str(payload.get("name", "Jornada"))[:80], "start": str(payload.get("start", "09:00"))[:5], "end": str(payload.get("end", "18:00"))[:5], "breakMinutes": max(0, int(payload.get("breakMinutes", 60))), "weekdays": payload.get("weekdays", [1,2,3,4,5])}
                     config["schedules"] = [s for s in config["schedules"] if s["id"] != schedule["id"]] + [schedule]; save_config(config); return self.send_json(201, schedule)
@@ -1266,7 +1428,11 @@ class Handler(BaseHTTPRequestHandler):
                     match["tokenHash"] = hashlib.sha256(token.encode()).hexdigest(); match["createdAt"] = now.isoformat(); match["expiresAt"] = (now + timedelta(days=7)).isoformat()
                     save_config(config); audit("invite.resend", current["email"], {"email": email})
                     host = self.headers.get("Host") or urllib.parse.urlsplit(PUBLIC_URL).netloc
-                    return self.send_json(200, {"email": email, "role": match["role"], "inviteUrl": f"https://{host}/?invite={token}"})
+                    invite_url = f"https://{host}/?invite={token}"
+                    tenant_name = next((t.get("name") for t in config.get("tenants", []) if t.get("id") == match.get("tenantId")), "")
+                    sent = mailer.send_invite(email, match["role"], invite_url, tenant_name or "")
+                    if sent.get("ok"): audit("invite.email_sent", current["email"], {"email": email})
+                    return self.send_json(200, {"email": email, "role": match["role"], "inviteUrl": invite_url, "emailSent": bool(sent.get("ok"))})
                 if parsed.path == "/dashboard/invites/revoke":
                     email = str(payload.get("email", "")).strip().lower()
                     before = len(config["invites"])
@@ -1463,6 +1629,55 @@ class Handler(BaseHTTPRequestHandler):
             account = config["accounts"][email]
         self.send_session(email, {"email": email, "name": account["name"], "role": account["role"], "tenantId": account["tenantId"]})
 
+    def reset_info(self, params: dict) -> None:
+        token = params.get("token", [""])[0]; digest = hashlib.sha256(token.encode()).hexdigest(); now = datetime.now(timezone.utc)
+        for email, account in load_config()["accounts"].items():
+            try:
+                if account.get("resetHash") and hmac.compare_digest(digest, account["resetHash"]) and parse_timestamp(account["resetExpires"]) > now:
+                    return self.send_json(200, {"email": email})
+            except (KeyError, ValueError): continue
+        return self.send_json(404, {"error": "invalid_reset"})
+
+    def do_forgot_password(self) -> None:
+        try: payload = self.read_json()
+        except Exception: return self.send_json(400, {"error": "invalid_json"})
+        email = str(payload.get("email", "")).strip().lower(); ip = client_ip(self.headers)
+        # throttle por IP p/ nao virar vetor de e-mail bombing; sempre responde 200 (sem enumeracao de contas)
+        if login_blocked("reset:ip:" + ip): return self.send_json(200, {"ok": True})
+        record_login_failure("reset:ip:" + ip)
+        with _CONFIG_LOCK:
+            config = load_config(); account = config["accounts"].get(email)
+            if account and account.get("status") == "active":
+                token = secrets.token_urlsafe(32); now = datetime.now(timezone.utc)
+                account["resetHash"] = hashlib.sha256(token.encode()).hexdigest()
+                account["resetExpires"] = (now + timedelta(hours=1)).isoformat()
+                save_config(config); audit("auth.reset_requested", email, {"ip": ip})
+                host = self.headers.get("Host") or urllib.parse.urlsplit(PUBLIC_URL).netloc
+                sent = mailer.send_password_reset(email, f"https://{host}/?reset={token}")
+                if sent.get("ok"): audit("auth.reset_email_sent", email, {})
+        return self.send_json(200, {"ok": True})
+
+    def do_reset_password(self) -> None:
+        try: payload = self.read_json()
+        except Exception: return self.send_json(400, {"error": "invalid_json"})
+        token = str(payload.get("token", "")); password = str(payload.get("password", ""))
+        if len(password) < 8: return self.send_json(400, {"error": "weak_password"})
+        digest = hashlib.sha256(token.encode()).hexdigest(); now = datetime.now(timezone.utc)
+        with _CONFIG_LOCK:
+            config = load_config(); target = None
+            for email, account in config["accounts"].items():
+                try:
+                    if account.get("resetHash") and hmac.compare_digest(digest, account["resetHash"]) and parse_timestamp(account["resetExpires"]) > now:
+                        target = email; break
+                except (KeyError, ValueError): continue
+            if not target: return self.send_json(400, {"error": "invalid_reset"})
+            account = config["accounts"][target]
+            account["pw"] = hash_password(password); account.pop("resetHash", None); account.pop("resetExpires", None); account["status"] = "active"
+            save_config(config); clear_login_failures(target); clear_login_failures("ip:" + client_ip(self.headers))
+            audit("auth.reset_completed", target, {})
+            view = {"email": target, "name": account.get("name", target), "role": account.get("role"), "tenantId": account.get("tenantId")}
+        self.send_session(target, view)
+
     def get_policies(self, current: dict, params: dict) -> None:
         config = load_config()
         is_super = current["role"] == "super_admin"
@@ -1571,4 +1786,5 @@ if __name__ == "__main__":
     threading.Thread(target=retention_worker, daemon=True).start()
     threading.Thread(target=rollup_worker, daemon=True).start()
     threading.Thread(target=digest_worker, daemon=True).start()
+    threading.Thread(target=alert_email_worker, daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", 5610), Handler).serve_forever()

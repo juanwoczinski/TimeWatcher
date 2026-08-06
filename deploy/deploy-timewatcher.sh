@@ -7,6 +7,7 @@ REMOTE_HOST="${TIMEWATCHER_HOST:-ubuntu@32.193.139.223}"
 SSH_KEY="${TIMEWATCHER_SSH_KEY:-/Users/juankleber/Documents/Codex/2026-07-18/ten/outputs/aws_recovery_ed25519}"
 RELEASE_ID="$(date -u +%Y%m%d%H%M%S)"
 REMOTE_STAGE="/tmp/timewatcher-release-$RELEASE_ID"
+UPLOAD_INSTALLERS="${TIMEWATCHER_UPLOAD_INSTALLERS:-0}"
 
 if [[ ! -f "$SSH_KEY" ]]; then
   echo "Chave SSH não encontrada: $SSH_KEY" >&2
@@ -17,12 +18,23 @@ SSH=(ssh -i "$SSH_KEY" -o BatchMode=yes)
 RSYNC_SSH="ssh -i $SSH_KEY -o BatchMode=yes"
 
 echo "[1/5] Enviando a versão para $REMOTE_HOST"
-"${SSH[@]}" "$REMOTE_HOST" "mkdir -p '$REMOTE_STAGE/platform' '$REMOTE_STAGE/config'"
+"${SSH[@]}" "$REMOTE_HOST" "mkdir -p '$REMOTE_STAGE/platform' '$REMOTE_STAGE/config' '$REMOTE_STAGE/downloads'"
 rsync -az --delete \
-  --exclude '.git' --exclude 'node_modules' --exclude 'dist' --exclude '.wrangler' \
+  --exclude '.git' --exclude 'node_modules' --exclude 'dist' --exclude '.wrangler' --exclude 'public/downloads' \
   -e "$RSYNC_SSH" "$PROJECT_DIR/timewatcher-platform/" "$REMOTE_HOST:$REMOTE_STAGE/platform/"
+if [[ "$UPLOAD_INSTALLERS" == "1" ]]; then
+  "$PROJECT_DIR/installers/macos/build-pkg.sh" >/dev/null
+  # ZIP files are already compressed. Sending only the active individual
+  # installer avoids re-uploading legacy PKG/MSI artifacts on every release.
+  rsync -a -e "$RSYNC_SSH" \
+    "$PROJECT_DIR/timewatcher-platform/public/downloads/TimeWatcher-Agent-macOS.zip" \
+    "$PROJECT_DIR/timewatcher-platform/public/downloads/TimeWatcher-Agent-macOS.zip.sha256" \
+    "$REMOTE_HOST:$REMOTE_STAGE/downloads/"
+fi
 scp -i "$SSH_KEY" \
   "$PROJECT_DIR/watchsynova-agent/server/ingest_server.py" \
+  "$PROJECT_DIR/watchsynova-agent/server/mailer.py" \
+  "$PROJECT_DIR/watchsynova-agent/server/store.py" \
   "$PROJECT_DIR/watchsynova-agent/server/watchsynova-ingest.service" \
   "$PROJECT_DIR/deploy/timewatcher-platform.service" \
   "$PROJECT_DIR/deploy/watchsynova.caddy" \
@@ -32,7 +44,11 @@ echo "[2/5] Instalando dependências e construindo o dashboard"
 "${SSH[@]}" "$REMOTE_HOST" "bash -s" <<REMOTE
 set -euo pipefail
 sudo install -d -o timewatcher-platform -g timewatcher-platform /opt/timewatcher-platform /var/lib/timewatcher-platform
-sudo rsync -a --delete --exclude node_modules '$REMOTE_STAGE/platform/' /opt/timewatcher-platform/
+sudo rsync -a --delete --exclude node_modules --exclude public/downloads '$REMOTE_STAGE/platform/' /opt/timewatcher-platform/
+if [[ '$UPLOAD_INSTALLERS' == '1' ]]; then
+  sudo install -d -o timewatcher-platform -g timewatcher-platform /opt/timewatcher-platform/public/downloads
+  sudo rsync -a '$REMOTE_STAGE/downloads/' /opt/timewatcher-platform/public/downloads/
+fi
 sudo chown -R timewatcher-platform:timewatcher-platform /opt/timewatcher-platform
 cd /opt/timewatcher-platform
 sudo -u timewatcher-platform npm install
@@ -41,10 +57,14 @@ sudo install -d -o timewatcher-platform -g timewatcher-platform /opt/timewatcher
 
 echo "[3/5] Atualizando API e serviços"
 sudo install -m 0755 '$REMOTE_STAGE/config/ingest_server.py' /opt/watchsynova-agent/ingest_server.py
+sudo install -m 0644 '$REMOTE_STAGE/config/mailer.py' /opt/watchsynova-agent/mailer.py
+sudo install -m 0644 '$REMOTE_STAGE/config/store.py' /opt/watchsynova-agent/store.py
 sudo install -m 0644 '$REMOTE_STAGE/config/watchsynova-ingest.service' /etc/systemd/system/watchsynova-ingest.service
 sudo install -m 0644 '$REMOTE_STAGE/config/timewatcher-platform.service' /etc/systemd/system/timewatcher-platform.service
-sudo caddy validate --config '$REMOTE_STAGE/config/watchsynova.caddy' --adapter caddyfile
-sudo install -m 0644 '$REMOTE_STAGE/config/watchsynova.caddy' /etc/caddy/Caddyfile
+sudo install -d -m 0755 /etc/caddy/conf.d
+sudo install -m 0644 '$REMOTE_STAGE/config/watchsynova.caddy' /etc/caddy/conf.d/watchsynova.caddy
+printf '%s\n' '{' '	auto_https disable_redirects' '}' '' 'import /etc/caddy/conf.d/*.caddy' | sudo tee /etc/caddy/Caddyfile >/dev/null
+sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 sudo systemctl daemon-reload
 sudo systemctl enable watchsynova-ingest timewatcher-platform caddy >/dev/null
 sudo systemctl restart watchsynova-ingest timewatcher-platform caddy

@@ -52,7 +52,7 @@ function ShaderPanel() {
             className="size-9 rounded-lg xl:size-11"
           />
           <span className="text-lg font-medium text-white/85 xl:text-2xl">
-            TeamWatcher · by Synova IT
+            TimeWatcher · by Synova IT
           </span>
         </div>
       </div>
@@ -168,8 +168,8 @@ export function AuthScreen({
             </h1>
             <p className="mt-3 text-lg leading-snug text-black/60 dark:text-white/55 sm:text-xl">
               {isSetPw
-                ? "Crie sua senha para acessar o TeamWatcher"
-                : "Acesse o painel do TeamWatcher"}
+                ? "Crie sua senha para acessar o TimeWatcher"
+                : "Acesse o painel do TimeWatcher"}
             </p>
 
             <form

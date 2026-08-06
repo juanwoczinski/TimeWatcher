@@ -1,4 +1,4 @@
-# TeamWatcher multi-tenant architecture
+# TimeWatcher multi-tenant architecture
 
 Every request and record is scoped by `tenant_id`. Browser authorization derives
 the active tenant from a server-side membership; device ingestion derives it

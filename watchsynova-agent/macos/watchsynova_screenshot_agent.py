@@ -20,19 +20,39 @@ SYNC_STATE = Path.home() / "Library/Application Support/WatchSynova/sync-state.j
 def browser_url(app: str) -> str:
     scripts = {
         "Google Chrome": 'tell application "Google Chrome" to get URL of active tab of front window',
+        "Google Chrome Canary": 'tell application "Google Chrome Canary" to get URL of active tab of front window',
         "Microsoft Edge": 'tell application "Microsoft Edge" to get URL of active tab of front window',
         "Brave Browser": 'tell application "Brave Browser" to get URL of active tab of front window',
+        "Arc": 'tell application "Arc" to get URL of active tab of front window',
+        "Vivaldi": 'tell application "Vivaldi" to get URL of active tab of front window',
         "Safari": 'tell application "Safari" to get URL of current tab of front window',
     }
     if app not in scripts:
+        return ""
+    try:
+        result = subprocess.run(["/usr/bin/osascript", "-e", scripts[app]], capture_output=True, text=True, timeout=3)
+        raw_url = result.stdout.strip() if result.returncode == 0 else ""
+        if not raw_url:
+            return ""
+        parsed = urllib.parse.urlsplit(raw_url)
+        # Query strings and fragments commonly contain tokens, search terms and
+        # other private data. Productivity reporting only needs the origin/path.
+        hostname = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        safe_netloc = hostname + port
+        return urllib.parse.urlunsplit((parsed.scheme, safe_netloc, parsed.path or "/", "", ""))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return ""
 
 
 def browser_title(app: str) -> str:
     scripts = {
         "Google Chrome": 'tell application "Google Chrome" to get title of active tab of front window',
+        "Google Chrome Canary": 'tell application "Google Chrome Canary" to get title of active tab of front window',
         "Microsoft Edge": 'tell application "Microsoft Edge" to get title of active tab of front window',
         "Brave Browser": 'tell application "Brave Browser" to get title of active tab of front window',
+        "Arc": 'tell application "Arc" to get title of active tab of front window',
+        "Vivaldi": 'tell application "Vivaldi" to get title of active tab of front window',
         "Safari": 'tell application "Safari" to get name of current tab of front window',
     }
     if app not in scripts:
@@ -42,19 +62,19 @@ def browser_title(app: str) -> str:
         return result.stdout.strip() if result.returncode == 0 else ""
     except (OSError, subprocess.TimeoutExpired):
         return ""
-    try:
-        result = subprocess.run(["/usr/bin/osascript", "-e", scripts[app]], capture_output=True, text=True, timeout=3)
-        return result.stdout.strip() if result.returncode == 0 else ""
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
 
 
 def active_window() -> tuple[str, str, str]:
+    frontmost = ""
+    data: dict = {}
     try:
         frontmost = subprocess.run(
             ["/usr/bin/osascript", "-e", 'tell application "System Events" to get name of first application process whose frontmost is true'],
             capture_output=True, text=True, timeout=3,
         ).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
         with urllib.request.urlopen("http://127.0.0.1:5600/api/0/buckets/", timeout=3) as response:
             buckets = json.load(response)
         bucket = next(key for key in buckets if key.startswith("aw-watcher-window_"))
@@ -62,11 +82,11 @@ def active_window() -> tuple[str, str, str]:
         with urllib.request.urlopen(url, timeout=3) as response:
             events = json.load(response)
         data = events[0].get("data", {}) if events else {}
-        app = frontmost or str(data.get("app", ""))
-        url = browser_url(app)
-        return app, (browser_title(app) if url else str(data.get("title", ""))), url
     except Exception:
-        return "", "", ""
+        pass
+    app = frontmost or str(data.get("app", ""))
+    url = browser_url(app)
+    return app, (browser_title(app) if url else str(data.get("title", ""))), url
 
 
 def upload(path: Path, config: dict) -> bool:
@@ -142,13 +162,26 @@ def sync_web_context(config: dict) -> bool:
         config["server_url"].rstrip("/") + "/ingest/v1/activity-events",
         config["token"],
         {"bucket": {"id": f"timewatcher-web_{platform.node()}", "type": "web.tab.current", "client": "timewatcher-agent", "hostname": platform.node(), "data": {}},
-         "events": [{"timestamp": now, "duration": max(30, int(config.get("interval_seconds", 60))), "data": {"url": url, "title": title, "app": app}}]},
+         "events": [{"timestamp": now, "duration": max(2, int(config.get("web_interval_seconds", 5))), "data": {"url": url, "title": title, "app": app}}]},
+    )
+
+
+def sync_heartbeat(config: dict) -> bool:
+    """Report agent liveness independently from user activity."""
+    hostname = platform.node()
+    now = datetime.now(timezone.utc).isoformat()
+    return authenticated_json(
+        config["server_url"].rstrip("/") + "/ingest/v1/activity-events",
+        config["token"],
+        {"bucket": {"id": f"timewatcher-heartbeat_{hostname}", "type": "timewatcher.heartbeat", "client": "timewatcher-agent", "hostname": hostname, "data": {}},
+         "events": [{"timestamp": now, "duration": 0, "data": {"version": "0.3.0", "platform": "macOS"}}]},
     )
 
 
 def run_once(config: dict) -> bool:
     activity_synced = sync_activity(config)
     web_synced = sync_web_context(config)
+    heartbeat_synced = sync_heartbeat(config)
     QUEUE.mkdir(parents=True, exist_ok=True)
     for pending in sorted(QUEUE.glob("*.jpg")):
         if upload(pending, config):
@@ -161,7 +194,7 @@ def run_once(config: dict) -> bool:
         return False
     if upload(target, config):
         target.unlink()
-        return activity_synced and web_synced
+        return activity_synced and web_synced and heartbeat_synced
     return False
 
 
@@ -173,7 +206,9 @@ def main() -> None:
     if "--once" in sys.argv:
         raise SystemExit(0 if run_once(config) else 1)
     if "--sync-only" in sys.argv:
-        raise SystemExit(0 if sync_activity(config) and sync_web_context(config) else 1)
+        raise SystemExit(0 if sync_activity(config) and sync_web_context(config) and sync_heartbeat(config) else 1)
+    if "--web-only" in sys.argv:
+        raise SystemExit(0 if sync_web_context(config) else 1)
     while True:
         run_once(config)
         time.sleep(interval)

@@ -11,12 +11,12 @@ async function render() {
   }, { waitUntil() {}, passThroughOnException() {} });
 }
 
-test("server-renders a valid TeamWatcher HTML document", async () => {
+test("server-renders a valid TimeWatcher HTML document", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
-  assert.match(html, /<title>TeamWatcher — Work Intelligence<\/title>/i);
+  assert.match(html, /<title>TimeWatcher — Work Intelligence<\/title>/i);
   assert.doesNotMatch(html, /Ana Martins|Carlos Nunes|Orbe Logística|Norte Labs/);
 });
 
@@ -28,11 +28,13 @@ test("auth-gated app wires the protected platform API", async () => {
   ]);
   assert.match(page, /platform-api\/auth\/me/);
   assert.match(page, /platform-api\/dashboard\/data/);
-  assert.match(page, /platform-api\/dashboard\/people\/schedule/);
+  assert.match(page, /platform-api\/dashboard\/people/);
   assert.match(page, /URLs e sites acessados/);
-  assert.match(page, /setInterval\(load,\s*30000\)/);
-  assert.doesNotMatch(page, /const people\s*=|const captures\s*=/);
+  assert.match(page, /setInterval\(\(\) => load\(\),\s*30000\)/);
+  assert.match(page, /q\.set\("refresh",\s*"1"\)/);
+  assert.match(page, /Paginação de URLs/);
+  assert.doesNotMatch(page, /Ana Martins|Carlos Nunes|Orbe Logística|Norte Labs/);
   assert.match(auth, /platform-api\/auth\/login/);
   assert.match(auth, /platform-api\/auth\/accept-invite/);
-  assert.match(layout, /title:\s*"TeamWatcher — Work Intelligence"/);
+  assert.match(layout, /title:\s*"TimeWatcher — Work Intelligence"/);
 });

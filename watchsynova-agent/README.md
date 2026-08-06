@@ -1,6 +1,6 @@
-# TeamWatcher agent
+# TimeWatcher agent
 
-TeamWatcher is a single menu-bar application that manages ActivityWatch-compatible
+TimeWatcher is a single menu-bar application that manages ActivityWatch-compatible
 collectors, captures the main macOS display at a configurable interval,
 and uploads JPEG images to a write-only endpoint over HTTPS. It is designed to
 and records screenshot metadata in a `timewatcher.screenshot` bucket.

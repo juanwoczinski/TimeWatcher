@@ -1,7 +1,3 @@
-{
-	auto_https disable_redirects
-}
-
 timewatcher.32-193-139-223.sslip.io {
 	route {
 		# Agent ingestion — bearer-token endpoints only. Restricting to /v1/*

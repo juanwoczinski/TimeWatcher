@@ -1,6 +1,6 @@
-# TeamWatcher brand
+# TimeWatcher brand
 
-TeamWatcher is represented by a striped gradient globe (cyan-to-violet) with the
+TimeWatcher is represented by a striped gradient globe (cyan-to-violet) with the
 `TEAMWATCHER by Synova IT` wordmark. The mark conveys continuous, worldwide team
 observation and measurable activity without reusing ActivityWatch artwork.
 
@@ -14,7 +14,7 @@ observation and measurable activity without reusing ActivityWatch artwork.
 
 ## Product naming
 
-- Full name: `TeamWatcher`
+- Full name: `TimeWatcher`
 - Menu-bar abbreviation: `TW`
 - Bundle identifier: `com.timewatcher.app`
 - Event type: `timewatcher.screenshot`

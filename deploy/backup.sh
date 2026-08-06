@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TeamWatcher — daily backup of the platform state (config, session secret,
+# TimeWatcher — daily backup of the platform state (config, session secret,
 # accounts/invites, audit log, avatars). Screenshots and ActivityWatch
 # telemetry are intentionally excluded (large; back them up separately).
 # Install: sudo install -m0755 backup.sh /opt/teamwatcher-backup.sh

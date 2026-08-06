@@ -1,4 +1,4 @@
-# TeamWatcher deployment
+# TimeWatcher deployment
 
 The AWS deployment runs the official ActivityWatch v0.13.2 Linux release as a
 systemd service. The server binds only to `127.0.0.1:5600` because ActivityWatch
@@ -38,3 +38,22 @@ Para outro host ou chave, defina `TIMEWATCHER_HOST` e
 Persistent ActivityWatch data is owned by the dedicated `activitywatch` system
 user under `/var/lib/activitywatch`. Application files live under
 `/opt/watchsynova`.
+## Deploy rápido
+
+O deploy normal não reenvia os instaladores grandes:
+
+```bash
+./deploy/deploy-timewatcher.sh
+```
+
+Quando o agente mudar, gere e publique também os instaladores:
+
+```bash
+TIMEWATCHER_UPLOAD_INSTALLERS=1 ./deploy/deploy-timewatcher.sh
+```
+
+Para substituir o agente deste Mac pela versão atual:
+
+```bash
+./installers/macos/install-local.sh
+```

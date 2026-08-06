@@ -581,18 +581,27 @@ const ACCOUNT_ROLE: Record<string, string> = {
 };
 
 export default function App() {
-  const [phase, setPhase] = useState<"loading" | "login" | "setpw" | "app">(
-    "loading",
-  );
+  const [phase, setPhase] = useState<
+    "loading" | "login" | "setpw" | "resetpw" | "app"
+  >("loading");
   const [inviteToken, setInviteToken] = useState<string | null>(null);
+  const [resetToken, setResetToken] = useState<string | null>(null);
   useEffect(() => {
-    let token: string | null = null;
+    let invite: string | null = null;
+    let reset: string | null = null;
     try {
-      token = new URL(window.location.href).searchParams.get("invite");
+      const q = new URL(window.location.href).searchParams;
+      invite = q.get("invite");
+      reset = q.get("reset");
     } catch {}
-    if (token) {
-      setInviteToken(token);
+    if (invite) {
+      setInviteToken(invite);
       setPhase("setpw");
+      return;
+    }
+    if (reset) {
+      setResetToken(reset);
+      setPhase("resetpw");
       return;
     }
     fetch("/platform-api/auth/me", { credentials: "same-origin" })
@@ -603,8 +612,10 @@ export default function App() {
   if (phase === "app") return <Dashboard />;
   return (
     <AuthScreen
-      mode={phase === "setpw" ? "setpw" : "login"}
-      token={inviteToken}
+      mode={
+        phase === "setpw" ? "setpw" : phase === "resetpw" ? "reset" : "login"
+      }
+      token={phase === "resetpw" ? resetToken : inviteToken}
       onDone={() => window.location.replace("/")}
     />
   );
@@ -617,7 +628,9 @@ function Dashboard() {
     [tenant, setTenant] = useState(""),
     [data, setData] = useState<Data | null>(null),
     [error, setError] = useState(""),
-    [loading, setLoading] = useState(true);
+    [loading, setLoading] = useState(true),
+    [refreshing, setRefreshing] = useState(false);
+  const requestSequence = useRef(0);
   const [collapsed, setCollapsed] = useState(false);
   const [density, setDensity] = useState<"comfortable" | "compact">(
     "comfortable",
@@ -625,7 +638,8 @@ function Dashboard() {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState("");
-  const load = useCallback(async () => {
+  const load = useCallback(async (forceRefresh = false) => {
+    const sequence = ++requestSequence.current;
     try {
       setError("");
       const q = new URLSearchParams({ period });
@@ -634,12 +648,14 @@ function Dashboard() {
         q.set("end", end);
       }
       if (tenant) q.set("tenant", tenant);
+      if (forceRefresh) q.set("refresh", "1");
       const r = await fetch(`/platform-api/dashboard/data?${q}`, {
         credentials: "same-origin",
         cache: "no-store",
       });
       if (!r.ok) throw Error();
       const next = await r.json();
+      if (sequence !== requestSequence.current) return;
       setData(next);
       if (!tenant) setTenant(next.tenant.id);
     } catch {
@@ -648,10 +664,15 @@ function Dashboard() {
       setLoading(false);
     }
   }, [period, start, end, tenant]);
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
+    await load(true);
+    setRefreshing(false);
+  }, [load]);
   useEffect(() => {
     setLoading(true);
     load();
-    const t = setInterval(load, 30000);
+    const t = setInterval(() => load(), 30000);
     return () => clearInterval(t);
   }, [load]);
   useEffect(() => {
@@ -671,15 +692,18 @@ function Dashboard() {
   }, []);
   const isAdmin =
     data?.viewer.role === "super_admin" || data?.viewer.role === "org_admin";
+  const isMember =
+    data?.viewer.role === "member" || data?.viewer.role === "employee";
   const nav = baseNav.filter((n) => {
+    if (isMember) return n.name === "Visão geral" || n.name === "Atividades";
     if (n.name === "Empresas") return data?.viewer.role === "super_admin";
     if (n.name === "Acessos" || n.name === "Faturamento") return isAdmin;
     if (n.name === "OUs" || n.name === "Alertas" || n.name === "Intelligence")
       return isAdmin || data?.viewer.role === "manager";
     return true;
   });
-  const tenantName = data?.tenant.name || "TeamWatcher";
-  const shownName = displayName || data?.viewer.name || "TeamWatcher";
+  const tenantName = data?.tenant.name || "TimeWatcher";
+  const shownName = displayName || data?.viewer.name || "TimeWatcher";
   const initials =
     shownName
       .split(" ")
@@ -736,19 +760,8 @@ function Dashboard() {
         <div className="brand">
           <img src="/timewatcher-logo.png" alt="" />
           <div>
-            <strong>TeamWatcher</strong>
+            <strong>TimeWatcher</strong>
             <span>Inteligência do tempo</span>
-          </div>
-        </div>
-        <div className="tenant-picker">
-          <span className="tenant-mark">{tenantName[0]}</span>
-          <div>
-            <strong>{tenantName}</strong>
-            <small>
-              {data?.viewer.role === "super_admin"
-                ? "Console Synova · Super admin"
-                : "Ambiente da organização"}
-            </small>
           </div>
         </div>
         <nav>
@@ -829,8 +842,8 @@ function Dashboard() {
             <h1>{active}</h1>
             <p>{desc[active]}</p>
           </div>
-          <button className="refresh-button" onClick={load}>
-            ↻ Atualizar
+          <button className="refresh-button" onClick={refresh} disabled={refreshing}>
+            {refreshing ? "↻ Atualizando…" : "↻ Atualizar"}
           </button>
         </header>
         <div className="toolbar advanced">
@@ -842,6 +855,7 @@ function Dashboard() {
               ? "Agente conectado"
               : "Sem sincronização recente"}
             {data?.summary.lastSeen && ` · ${date(data.summary.lastSeen)}`}
+            {data?.generatedAt && ` · painel atualizado ${date(data.generatedAt)}`}
           </div>
           <div className="filters">
             {data?.viewer.role === "super_admin" && (
@@ -1287,16 +1301,56 @@ function initials(name: string) {
     (name.match(/\b\p{L}/gu) || []).slice(0, 2).join("").toUpperCase() || "?"
   );
 }
+function Pager({
+  page,
+  pageCount,
+  total,
+  onPage,
+}: {
+  page: number;
+  pageCount: number;
+  total: number;
+  onPage: (p: number) => void;
+}) {
+  if (pageCount <= 1) return null;
+  return (
+    <div className="pager">
+      <span className="pager-info">
+        Página {page + 1} de {pageCount} · {total} no total
+      </span>
+      <div className="pager-btns">
+        <button
+          className="btn ghost"
+          disabled={page === 0}
+          onClick={() => onPage(page - 1)}
+        >
+          ← Anterior
+        </button>
+        <button
+          className="btn ghost"
+          disabled={page >= pageCount - 1}
+          onClick={() => onPage(page + 1)}
+        >
+          Próxima →
+        </button>
+      </div>
+    </div>
+  );
+}
+const PEOPLE_PER_PAGE = 12;
 function People({ d, reload }: { d: Data; reload: () => void }) {
   const [dir, setDir] = useState<Directory | null>(null);
   const [q, setQ] = useState("");
+  const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [adding, setAdding] = useState(false);
-  const [invite, setInvite] = useState<{ email: string; url: string } | null>(
-    null,
-  );
+  const [invite, setInvite] = useState<{
+    email: string;
+    url: string;
+    emailSent?: boolean;
+  } | null>(null);
   const canEdit =
     d.viewer.role === "super_admin" || d.viewer.role === "org_admin";
 
@@ -1321,6 +1375,15 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
     );
   });
   const current = people.find((person) => person.id === selected) || null;
+  useEffect(() => {
+    setPage(0);
+  }, [q]);
+  const pageCount = Math.max(1, Math.ceil(people.length / PEOPLE_PER_PAGE));
+  const safePage = Math.min(page, pageCount - 1);
+  const shown = people.slice(
+    safePage * PEOPLE_PER_PAGE,
+    safePage * PEOPLE_PER_PAGE + PEOPLE_PER_PAGE,
+  );
 
   async function post(path: string, body: object) {
     const r = await fetch(`/platform-api/dashboard/${path}`, {
@@ -1355,7 +1418,8 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
   }
   async function grantAccess(email: string, role: string) {
     const x = await post("invites", { email, role });
-    if (x?.inviteUrl) setInvite({ email, url: x.inviteUrl });
+    if (x?.inviteUrl)
+      setInvite({ email, url: x.inviteUrl, emailSent: !!x.emailSent });
   }
 
   return (
@@ -1392,7 +1456,11 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
       )}
       {invite && (
         <div className="invite-link">
-          <span>Acesso concedido a {invite.email} — envie o magic link:</span>
+          <span>
+            {invite.emailSent
+              ? `Acesso concedido a ${invite.email} — convite enviado por e-mail. Link de backup:`
+              : `Acesso concedido a ${invite.email} — envie o magic link:`}
+          </span>
           <div className="invite-link-row">
             <code>{invite.url}</code>
             <button
@@ -1420,61 +1488,70 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
           }
         />
       ) : (
-        <div className="roster">
-          {people.map((person) => (
-            <article
-              key={person.id}
-              className={`person-card${selected === person.id ? " selected" : ""}`}
-              onClick={() =>
-                setSelected(selected === person.id ? null : person.id)
-              }
-            >
-              <div className="person-head">
-                <div className="avatar">{initials(person.name)}</div>
-                <div className="person-meta">
-                  <strong>{person.name}</strong>
-                  <small>
-                    {person.device} · {teamName(person.teamId)}
-                  </small>
-                </div>
-                <span className={`pill ${person.status}`}>{person.status}</span>
-              </div>
-              <div className="person-tags">
-                {person.licenseType ? (
-                  <span
-                    className={`lic-tag ${person.licenseType}`}
-                    title="Licença"
+        <>
+          <div className="table-wrap">
+            <table className="data-table people-table">
+              <thead>
+                <tr>
+                  <th>Pessoa</th>
+                  <th>OU</th>
+                  <th>Licença</th>
+                  <th>Status</th>
+                  <th className="num">Monitorado</th>
+                  <th className="num">Ativo</th>
+                  <th className="num">Foco</th>
+                  <th>Visto</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shown.map((person) => (
+                  <tr
+                    key={person.id}
+                    className={selected === person.id ? "sel" : ""}
+                    onClick={() =>
+                      setSelected(selected === person.id ? null : person.id)
+                    }
                   >
-                    {LICENSE_LABEL[person.licenseType]}
-                  </span>
-                ) : (
-                  <span className="lic-tag none">Sem licença</span>
-                )}
-                {!person.hasTelemetry && (
-                  <span className="lic-tag idle">Sem telemetria</span>
-                )}
-              </div>
-              <dl className="person-stats">
-                <div>
-                  <dt>Monitorado</dt>
-                  <dd>{duration(person.trackedSeconds)}</dd>
-                </div>
-                <div>
-                  <dt>Ativo</dt>
-                  <dd>{duration(person.activeSeconds)}</dd>
-                </div>
-                <div>
-                  <dt>Foco</dt>
-                  <dd>{person.focusScore}%</dd>
-                </div>
-                <div>
-                  <dt>Visto</dt>
-                  <dd>{date(person.lastSeen)}</dd>
-                </div>
-              </dl>
-            </article>
-          ))}
-        </div>
+                    <td className="cell-person">
+                      <span className="avatar tiny">
+                        {initials(person.name)}
+                      </span>
+                      <span className="cell-person-meta">
+                        <strong>{person.name}</strong>
+                        <small>{person.device || person.email || "—"}</small>
+                      </span>
+                    </td>
+                    <td>{teamName(person.teamId)}</td>
+                    <td>
+                      {person.licenseType ? (
+                        <span className={`lic-tag ${person.licenseType}`}>
+                          {LICENSE_LABEL[person.licenseType]}
+                        </span>
+                      ) : (
+                        <span className="lic-tag none">—</span>
+                      )}
+                    </td>
+                    <td>
+                      <span className={`pill ${person.status}`}>
+                        {person.status}
+                      </span>
+                    </td>
+                    <td className="num">{duration(person.trackedSeconds)}</td>
+                    <td className="num">{duration(person.activeSeconds)}</td>
+                    <td className="num">{person.focusScore}%</td>
+                    <td>{date(person.lastSeen)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <Pager
+            page={safePage}
+            pageCount={pageCount}
+            total={people.length}
+            onPage={setPage}
+          />
+        </>
       )}
       {current && (
         <article className="card data-card">
@@ -1966,7 +2043,7 @@ function Billing({ d }: { d: Data }) {
       >
         <div className="card-head">
           <div>
-            <h2>TeamWatcher Intelligence (IA)</h2>
+            <h2>TimeWatcher Intelligence (IA)</h2>
             <p>
               {b.features.intelligence
                 ? `Ativo — ${b.pool.intelligence} licença(s) Intelligence no pool.`
@@ -2114,7 +2191,7 @@ function GateCard({ go }: { go: (s: Section) => void }) {
     <article className="card gate-card">
       <div className="card-head">
         <div>
-          <h2>TeamWatcher Intelligence (IA)</h2>
+          <h2>TimeWatcher Intelligence (IA)</h2>
           <p>Disponível no plano Intelligence.</p>
         </div>
         <span className="pill offline">Bloqueado</span>
@@ -2248,7 +2325,7 @@ function Intelligence({ d, go }: { d: Data; go: (s: Section) => void }) {
   return (
     <div className="page-stack">
       <div className="section-summary">
-        <strong>TeamWatcher Intelligence</strong>
+        <strong>TimeWatcher Intelligence</strong>
         <span>
           Pergunte sobre a operação em linguagem natural — a síntese é apoiada nos
           dados reais do período.
@@ -2298,13 +2375,17 @@ function ChatWidget({ d, go }: { d: Data; go: (s: Section) => void }) {
         onClick={() => setOpen((o) => !o)}
         aria-label="Assistente IA"
       >
-        {open ? "×" : "IA"}
+        {open ? (
+          "×"
+        ) : (
+          <img src="/timewatcher-logo.png" alt="" className="chat-fab-logo" />
+        )}
       </button>
       {open && (
         <div className="chat-widget">
           <div className="chat-widget-head">
             <div>
-              <strong>Assistente TeamWatcher</strong>
+              <strong>Assistente TimeWatcher</strong>
               <span>Pergunte sobre a operação</span>
             </div>
             <button
@@ -2431,6 +2512,14 @@ function Teams({ d }: { d: Data }) {
   const [parentId, setParentId] = useState("");
   const [managerEmail, setManagerEmail] = useState("");
   const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState<Set<string>>(new Set());
+  const toggle = (id: string) =>
+    setOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   const canManage =
     d.viewer.role === "super_admin" || d.viewer.role === "org_admin";
   const load = useCallback(async () => {
@@ -2536,76 +2625,86 @@ function Teams({ d }: { d: Data }) {
       {td && td.teams.length === 0 ? (
         <State text="Nenhuma OU criada ainda." />
       ) : (
-        <div className="ou-tree">
+        <div className="ou-tree card">
           {ordered.map(({ team, depth }) => {
+            const isOpen = open.has(team.id);
             const outside = (td?.people || []).filter(
               (p) => p.teamId !== team.id,
             );
             return (
-              <article
-                className="card ou-card"
-                key={team.id}
-                style={{ marginLeft: `${depth * 26}px` }}
-              >
-                {depth > 0 && <span className="ou-branch" />}
-                <div className="card-head">
-                  <div>
-                    <h2>{team.name}</h2>
-                    <p>
-                      {team.managerName || team.managerEmail
-                        ? `Gestor: ${team.managerName || team.managerEmail}`
-                        : "Sem gestor definido"}
-                    </p>
-                  </div>
-                  <span className="pill offline">
-                    {team.memberCount} pessoa(s)
+              <div className="ou-node" key={team.id}>
+                <button
+                  className={`ou-row${isOpen ? " open" : ""}`}
+                  style={{ paddingLeft: `${16 + depth * 22}px` }}
+                  onClick={() => toggle(team.id)}
+                  aria-expanded={isOpen}
+                >
+                  <span className="ou-caret" aria-hidden>
+                    <Icon name="chevron" />
                   </span>
-                </div>
-                <div className="team-members">
-                  {team.members.length ? (
-                    team.members.map((m) => (
-                      <span className="member-chip" key={m.id}>
-                        <span className="avatar tiny">{initials(m.name)}</span>
-                        {m.name}
-                        {canManage && (
-                          <button
-                            className="chip-x"
-                            title="Remover da OU"
-                            onClick={() => assign(m.id, null)}
-                          >
-                            ×
-                          </button>
-                        )}
-                      </span>
-                    ))
-                  ) : (
-                    <span className="ou-empty">Sem pessoas nesta OU.</span>
-                  )}
-                </div>
-                {canManage && (
-                  <div className="ou-actions">
-                    <select
-                      value=""
-                      onChange={(e) => {
-                        if (e.target.value) assign(e.target.value, team.id);
-                      }}
-                    >
-                      <option value="">+ Adicionar pessoa…</option>
-                      {outside.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name}
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      className="btn ghost danger"
-                      onClick={() => remove(team.id)}
-                    >
-                      Excluir OU
-                    </button>
+                  <span className="ou-ico" aria-hidden>
+                    <Icon name="teams" />
+                  </span>
+                  <span className="ou-name">{team.name}</span>
+                  <span className="ou-manager">
+                    {team.managerName || team.managerEmail || "Sem gestor"}
+                  </span>
+                  <span className="ou-count">{team.memberCount}</span>
+                </button>
+                {isOpen && (
+                  <div
+                    className="ou-body"
+                    style={{ paddingLeft: `${38 + depth * 22}px` }}
+                  >
+                    {team.members.length ? (
+                      <ul className="ou-members">
+                        {team.members.map((m) => (
+                          <li key={m.id}>
+                            <span className="avatar tiny">
+                              {initials(m.name)}
+                            </span>
+                            <span className="ou-member-name">{m.name}</span>
+                            {canManage && (
+                              <button
+                                className="ou-member-x"
+                                title="Remover da OU"
+                                onClick={() => assign(m.id, null)}
+                              >
+                                Remover
+                              </button>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="ou-empty">Sem pessoas nesta OU.</p>
+                    )}
+                    {canManage && (
+                      <div className="ou-actions">
+                        <select
+                          value=""
+                          onChange={(e) => {
+                            if (e.target.value) assign(e.target.value, team.id);
+                          }}
+                        >
+                          <option value="">+ Adicionar pessoa…</option>
+                          {outside.map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.name}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          className="btn ghost danger"
+                          onClick={() => remove(team.id)}
+                        >
+                          Excluir OU
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
-              </article>
+              </div>
             );
           })}
         </div>
@@ -2765,9 +2864,9 @@ function Activities({ d }: { d: Data }) {
           <div className="onboarding">
             <strong>Coleta de URL ainda não está ativa neste Mac</strong>
             <p>
-              O servidor já aceita telemetria web. Instale o coletor/extensão
-              gerenciada do navegador para que URLs e tempo por página apareçam
-              aqui.
+              Abra Safari, Chrome, Edge, Brave, Arc ou Vivaldi com o TimeWatcher
+              Agent ativo. URLs, títulos, tempo por página e classificação de
+              produtividade aparecerão aqui automaticamente.
             </p>
           </div>
         )}
@@ -2833,32 +2932,49 @@ function AppTable({ apps }: { apps: App[] }) {
   );
 }
 function UrlTable({ urls }: { urls: UrlUsage[] }) {
+  const pageSize = 10;
+  const [page, setPage] = useState(1);
+  const pages = Math.max(1, Math.ceil(urls.length / pageSize));
+  const safePage = Math.min(page, pages);
+  const visible = urls.slice((safePage - 1) * pageSize, safePage * pageSize);
+  useEffect(() => setPage(1), [urls.length]);
   return (
-    <div className="url-table">
-      <div className="url-row head">
-        <span>Site / página</span>
-        <span>Classificação</span>
-        <span>Tempo</span>
-        <span>% web</span>
-      </div>
-      {urls.map((u) => (
-        <div className="url-row" key={u.url}>
-          <span>
-            <Glyph domain={u.domain} label={u.domain} kind="site" />
-            <span className="site-text">
-              <strong>{u.domain}</strong>
-              <small>{u.title || u.url}</small>
-            </span>
-          </span>
-          <span>
-            <em className={`classification ${u.classification}`}>
-              {classLabel[u.classification]}
-            </em>
-          </span>
-          <span>{u.duration}</span>
-          <span>{u.share}%</span>
+    <div>
+      <div className="url-table">
+        <div className="url-row head">
+          <span>Site / página</span>
+          <span>Classificação</span>
+          <span>Tempo</span>
+          <span>% web</span>
         </div>
-      ))}
+        {visible.map((u) => (
+          <div className="url-row" key={u.url}>
+            <span>
+              <Glyph domain={u.domain} label={u.domain} kind="site" />
+              <span className="site-text">
+                <strong>{u.domain}</strong>
+                <small>{u.title || u.url}</small>
+              </span>
+            </span>
+            <span>
+              <em className={`classification ${u.classification}`}>
+                {classLabel[u.classification]}
+              </em>
+            </span>
+            <span>{u.duration}</span>
+            <span>{u.share}%</span>
+          </div>
+        ))}
+      </div>
+      {pages > 1 && (
+        <nav className="table-pagination" aria-label="Paginação de URLs">
+          <span>{urls.length} URLs · página {safePage} de {pages}</span>
+          <div>
+            <button disabled={safePage === 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>Anterior</button>
+            <button disabled={safePage === pages} onClick={() => setPage((value) => Math.min(pages, value + 1))}>Próxima</button>
+          </div>
+        </nav>
+      )}
     </div>
   );
 }
@@ -3351,6 +3467,7 @@ function Users({ d }: { d: Data }) {
   const [link, setLink] = useState("");
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [mailed, setMailed] = useState(false);
   const [list, setList] = useState<{
     accounts: { email: string; name?: string; role: string; status?: string }[];
     invites: { email: string; role: string; expiresAt: string }[];
@@ -3382,6 +3499,7 @@ function Users({ d }: { d: Data }) {
     const x = await post("invites", { email, role });
     if (x) {
       setLink(x.inviteUrl || "");
+      setMailed(!!x.emailSent);
       setEmail("");
       load();
     }
@@ -3401,6 +3519,7 @@ function Users({ d }: { d: Data }) {
     const x = await post("invites/resend", { email: target });
     if (x?.inviteUrl) {
       setLink(x.inviteUrl);
+      setMailed(!!x.emailSent);
       setCopied(false);
     }
   }
@@ -3449,7 +3568,11 @@ function Users({ d }: { d: Data }) {
         </div>
         {link && (
           <div className="invite-link">
-            <span>Magic link — envie para a pessoa:</span>
+            <span>
+              {mailed
+                ? "Convite enviado por e-mail. Link de backup:"
+                : "Magic link — envie para a pessoa:"}
+            </span>
             <div className="invite-link-row">
               <code>{link}</code>
               <button
