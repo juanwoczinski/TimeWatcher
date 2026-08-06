@@ -94,8 +94,11 @@ type Device = {
   version?: string | null;
   updateRequested?: boolean;
   assignedPersonId?: string | null;
+  personName?: string | null;
+  personEmail?: string | null;
   inventory?: Record<string, string>;
   observedIp?: string | null;
+  signals?: Record<string, string>;
 };
 type Schedule = {
   id: string;
@@ -1141,6 +1144,17 @@ function ProductivityAnalytics({ d }: { d: Data }) {
     <article className="card analytics-card"><div className="card-head"><div><h2>{selfOnly ? "Meu ritmo de trabalho" : "Comparativo entre equipes"}</h2><p>{selfOnly ? "Interações e uso de aplicações no período selecionado." : "Índice de produtividade com base no tempo real."}</p></div></div><div className="analytics-list">{selfOnly ? <><div className="analytics-row"><span><b>Aplicações</b><small>tempo de janelas ativas</small></span><span>⌨ {duration(d.summary.inputSeconds)}</span><span>◉ {duration(d.summary.webSeconds)}</span><strong>{duration(d.summary.activeSeconds)}</strong></div><div className="analytics-row"><span><b>Jornada</b><small>tempo observado dentro da jornada</small></span><span>Meta {duration(d.summary.expectedSeconds || 0)}</span><span>Ativo {duration(d.summary.scheduledActiveSeconds || 0)}</span><strong>{Math.round(d.summary.scheduleAdherence || 0)}%</strong></div></> : report.teams.length ? report.teams.slice(0, 6).map((t) => <div className="analytics-row team" key={t.id}><span><b>{t.name}</b><small>{t.people} pessoa(s) · {duration(t.activeSeconds)} ativo</small></span><span>⌨ {duration(t.inputSeconds)}</span><span>◉ {duration(t.webSeconds)}</span><strong>{t.focusScore}%</strong></div>) : <State text="Atribua pessoas a uma OU para comparar equipes." />}</div></article>
   </div>;
 }
+function TeamCollectionVisibility({ d, go }: { d: Data; go: (section: Section) => void }) {
+  const [people, setPeople] = useState<DirPerson[]>([]);
+  const canSeeTeam = d.viewer.role === "super_admin" || d.viewer.role === "org_admin" || d.viewer.role === "manager";
+  useEffect(() => {
+    if (!canSeeTeam) return;
+    const q = new URLSearchParams({ period: d.period, scope: d.scope || "default" });
+    fetch(`/platform-api/dashboard/people?${q}`, { credentials: "same-origin", cache: "no-store" }).then(r => r.ok ? r.json() : null).then(x => setPeople(x?.people || [])).catch(() => setPeople([]));
+  }, [canSeeTeam, d.period, d.scope, d.generatedAt]);
+  if (!canSeeTeam) return null;
+  return <article className="card team-collection"><div className="card-head"><div><h2>Coleta por colaborador</h2><p>Quem está conectado, em qual host e qual atividade lidera o período.</p></div><button className="text-button" onClick={() => go("Pessoas")}>Ver pessoas →</button></div>{people.length ? <div className="team-collection-list">{people.slice(0, 8).map(person => <div key={person.id}><span className="avatar tiny">{initials(person.name)}</span><span><b>{person.name}</b><small>{person.device} · sessão {person.sessionUser || "não identificada"} · {person.status}</small></span><span><small>Principal atividade</small><b>{person.topUrls?.[0]?.domain || person.topApps?.[0]?.name || "Sem dados"}</b></span><strong>{duration(person.activeSeconds)} ativo</strong></div>)}</div> : <State text="Aguardando dados de colaboradores." />}</article>;
+}
 function SelfDeviceLink({ d, reload }: { d: Data; reload: () => void }) {
   const [host, setHost] = useState(d.selfLink?.candidates[0]?.host || "");
   const [saving, setSaving] = useState(false); const [message, setMessage] = useState("");
@@ -1201,6 +1215,7 @@ function Overview({ d, go, reload }: { d: Data; go: (s: Section) => void; reload
       <TrendCard period={d.period} />
       <MicroInsights d={d} />
       <ProductivityAnalytics d={d} />
+      {!selfOnly && <TeamCollectionVisibility d={d} go={go} />}
       <div className="grid-main">
         <article className="card activity">
           <div className="card-head">
@@ -1390,6 +1405,9 @@ type DirPerson = {
   teamId: string | null;
   scheduleId: string | null;
   email?: string | null;
+  sessionUser?: string | null;
+  observedIp?: string | null;
+  inventory?: Record<string, string>;
   licenseType?: "essential" | "intelligence" | null;
   registered?: boolean;
   hasTelemetry?: boolean;
@@ -1735,6 +1753,8 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
               <h3>{current.name}</h3>
               <p>
                 {current.platform} · visto {date(current.lastSeen)}
+                {current.sessionUser ? ` · sessão: ${current.sessionUser}` : ""}
+                {current.observedIp ? ` · IP: ${current.observedIp}` : ""}
               </p>
             </div>
             <dl>
@@ -2893,6 +2913,7 @@ const HEALTH_LABEL: Record<string, string> = {
 };
 function Devices({ d, reload }: { d: Data; reload: () => void }) {
   const [busy, setBusy] = useState("");
+  const [q, setQ] = useState(""); const [page, setPage] = useState(0); const [selected, setSelected] = useState<string | null>(null);
   const canManage =
     d.viewer.role === "super_admin" || d.viewer.role === "org_admin";
   async function toggleBlock(host: string, block: boolean) {
@@ -2913,84 +2934,49 @@ function Devices({ d, reload }: { d: Data; reload: () => void }) {
     await fetch("/platform-api/dashboard/devices/delete", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify({ host }) });
     setBusy(""); reload();
   }
+  const filtered = d.devices.filter((device) => `${device.name} ${device.id} ${device.personName || ""} ${device.inventory?.sessionUser || ""} ${device.observedIp || ""}`.toLowerCase().includes(q.trim().toLowerCase()));
+  const perPage = 20; const pages = Math.max(1, Math.ceil(filtered.length / perPage)); const safePage = Math.min(page, pages - 1); const shown = filtered.slice(safePage * perPage, safePage * perPage + perPage); const current = d.devices.find((device) => device.id === selected) || null;
+  useEffect(() => setPage(0), [q]);
   return (
     <div className="page-stack">
-      <div className="section-summary">
-        <strong>{d.devices.length} dispositivo(s) real(is)</strong>
-        <span>
-          Inventário criado automaticamente pela telemetria do agente ·
-          saúde e revogação de acesso por dispositivo.
-        </span>
-      </div>
-      <div className="device-grid">
-        {d.devices.map((x) => (
-          <DeviceCard
-            d={x}
-            key={x.id}
-            canManage={canManage}
-            busy={busy === x.id}
-            onToggleBlock={() => toggleBlock(x.id, !x.blocked)}
-            onRemove={() => remove(x.id)}
-          />
-        ))}
-      </div>
-      {d.devices
-        .filter((x) => !x.blocked)
-        .map((x) => (
-          <Gallery
-            device={x}
-            person={d.person.name}
-            tenantId={d.tenant.id}
-            key={`g-${x.id}`}
-          />
-        ))}
+      <div className="people-toolbar"><div className="section-summary"><strong>{filtered.length} dispositivo(s)</strong><span>Inventário, identidade de sessão, integridade do agente e sinais coletados por host.</span></div><input className="people-search" placeholder="Buscar por host, pessoa, usuário da sessão ou IP…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
+      <div className="table-wrap"><table className="data-table device-table"><thead><tr><th>Dispositivo</th><th>Colaborador</th><th>Usuário da sessão</th><th>IP</th><th>Status</th><th>Último sinal</th></tr></thead><tbody>{shown.map((x) => <tr key={x.id} className={selected === x.id ? "sel" : ""} onClick={() => setSelected(selected === x.id ? null : x.id)}><td className="cell-person"><span className="avatar tiny">⌘</span><span className="cell-person-meta"><strong>{x.name}</strong><small>{x.platform} · {x.id}</small></span></td><td>{x.personName || "Não vinculado"}<small className="table-sub">{x.personEmail || ""}</small></td><td>{x.inventory?.sessionUser || "—"}</td><td>{x.observedIp || x.inventory?.localIp || "—"}</td><td><span className={`pill ${x.blocked ? "offline" : x.health === "online" ? "online" : "offline"}`}>{x.blocked ? "removido/revogado" : HEALTH_LABEL[x.health || x.status]}</span></td><td>{date(x.lastSeen)}</td></tr>)}</tbody></table></div><Pager page={safePage} pageCount={pages} total={filtered.length} onPage={setPage} />
+      {current && <DeviceDetail d={current} canManage={canManage} busy={busy === current.id} onToggleBlock={() => toggleBlock(current.id, !current.blocked)} onRemove={() => remove(current.id)} onClose={() => setSelected(null)} />}
     </div>
   );
 }
-function DeviceCard({
+function DeviceDetail({
   d,
   canManage,
   busy,
   onToggleBlock,
   onRemove,
+  onClose,
 }: {
   d: Device;
   canManage: boolean;
   busy: boolean;
   onToggleBlock: () => void;
   onRemove: () => void;
+  onClose: () => void;
 }) {
   const health = d.blocked ? "offline" : d.health || d.status;
   const [name, setName] = useState(d.name);
   async function update(patch: object) { await fetch("/platform-api/dashboard/devices/update", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify({ host: d.id, ...patch }) }); }
   return (
-    <article className={`device-card${d.blocked ? " blocked" : ""}`}>
+    <article className={`card device-detail${d.blocked ? " blocked" : ""}`}>
       <div className="device-icon">⌘</div>
       <div>
         <h3>{d.name}</h3>
-        <p>
-          {d.platform} · {d.client || "agente"} · versão {d.version || "desconhecida"} · {d.id}
-        </p>
+        <p>{d.platform} · {d.client || "agente"} · versão {d.version || "desconhecida"} · host {d.id}</p>
       </div>
-      <span className={`pill ${d.blocked ? "offline" : health === "online" ? "online" : "offline"}`}>
+      <div className="head-actions"><button className="btn ghost" onClick={onClose}>Fechar</button><span className={`pill ${d.blocked ? "offline" : health === "online" ? "online" : "offline"}`}>
         {d.blocked ? "revogado" : HEALTH_LABEL[health] || d.status}
-      </span>
+      </span></div>
       <dl>
         <div>
           <dt>Sincronização</dt>
           <dd>{date(d.lastSeen)}</dd>
-        </div>
-        <div>
-          <dt>Monitorado</dt>
-          <dd>{duration(d.trackedSeconds)}</dd>
-        </div>
-        <div>
-          <dt>Teclas</dt>
-          <dd>{d.presses.toLocaleString("pt-BR")}</dd>
-        </div>
-        <div>
-          <dt>Cliques</dt>
-          <dd>{d.clicks.toLocaleString("pt-BR")}</dd>
         </div>
         <div>
           <dt>IP observado</dt>
@@ -3000,8 +2986,17 @@ function DeviceCard({
           <dt>Equipamento</dt>
           <dd>{d.inventory?.model || d.inventory?.architecture || "Aguardando inventário"}</dd>
         </div>
+        <div>
+          <dt>Pessoa vinculada</dt>
+          <dd>{d.personName || "Não vinculado"}</dd>
+        </div>
+        <div>
+          <dt>Usuário da sessão</dt>
+          <dd>{d.inventory?.sessionUser || "Aguardando agente atualizado"}</dd>
+        </div>
       </dl>
       {(d.inventory?.os || d.inventory?.memoryGB) && <p className="device-inventory">{d.inventory?.os} {d.inventory?.osVersion} · {d.inventory?.architecture} · {d.inventory?.memoryGB ? `${d.inventory.memoryGB} GB RAM` : ""}</p>}
+      <div className="device-signals"><strong>Sinais coletados</strong>{Object.keys(d.signals || {}).length ? Object.entries(d.signals || {}).map(([kind, timestamp]) => <span key={kind}>{kind}: {date(timestamp)}</span>) : <span>Aguardando sinais do agente.</span>}</div>
       {canManage && (
         <div className="device-actions">
           <button

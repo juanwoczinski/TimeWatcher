@@ -228,7 +228,7 @@ def register_device_signal(config: dict, tenant_id: str, hostname: str, client: 
     if version:
         entry["version"] = version[:80]
     if isinstance(inventory, dict):
-        entry["inventory"] = {key: str(value)[:160] for key, value in inventory.items() if key in ("os", "osVersion", "model", "architecture", "memoryGB", "localIp") and value not in (None, "")}
+        entry["inventory"] = {key: str(value)[:160] for key, value in inventory.items() if key in ("os", "osVersion", "model", "architecture", "memoryGB", "localIp", "sessionUser") and value not in (None, "")}
     if observed_ip and observed_ip not in ("local", "unknown"):
         entry["observedIp"] = observed_ip[:80]
 
@@ -765,7 +765,8 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
         age = (end - seen).total_seconds()
         return "online" if age < 300 else "stale" if age < 3600 else "offline"
     registry = config.get("devices") or {}
-    devices = [{"id": host, "name": (registry.get(f"{tenant_id}:{host}") or {}).get("name") or host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop", "lastSeen": seen.isoformat(), "status": "online" if (end - seen).total_seconds() < 300 else "offline", "health": device_health(seen), "client": clients_by_host.get(host), "version": (registry.get(f"{tenant_id}:{host}") or {}).get("version") or clients_by_host.get(host), "updateRequested": bool((registry.get(f"{tenant_id}:{host}") or {}).get("updateRequested")), "assignedPersonId": (registry.get(f"{tenant_id}:{host}") or {}).get("personId"), "blocked": host in blocked_hosts, "inventory": (registry.get(f"{tenant_id}:{host}") or {}).get("inventory", {}), "observedIp": (registry.get(f"{tenant_id}:{host}") or {}).get("observedIp"), "trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "presses": presses, "clicks": clicks, "signals": {name: timestamp.isoformat() for name, timestamp in signals_by_host.get(host, {}).items()}} for host, seen in sorted(devices_by_host.items())]
+    people_by_host = {person.get("host"): person for person in config.get("people", []) if person.get("tenantId") == tenant_id and person.get("host")}
+    devices = [{"id": host, "name": (registry.get(f"{tenant_id}:{host}") or {}).get("name") or host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop", "lastSeen": seen.isoformat(), "status": "online" if (end - seen).total_seconds() < 300 else "offline", "health": device_health(seen), "client": clients_by_host.get(host), "version": (registry.get(f"{tenant_id}:{host}") or {}).get("version") or clients_by_host.get(host), "updateRequested": bool((registry.get(f"{tenant_id}:{host}") or {}).get("updateRequested")), "assignedPersonId": (registry.get(f"{tenant_id}:{host}") or {}).get("personId"), "personName": (people_by_host.get(host) or {}).get("name"), "personEmail": (people_by_host.get(host) or {}).get("email"), "blocked": host in blocked_hosts, "inventory": (registry.get(f"{tenant_id}:{host}") or {}).get("inventory", {}), "observedIp": (registry.get(f"{tenant_id}:{host}") or {}).get("observedIp"), "trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "presses": presses, "clicks": clicks, "signals": {name: timestamp.isoformat() for name, timestamp in signals_by_host.get(host, {}).items()}} for host, seen in sorted(devices_by_host.items())]
     _managed = managed_team_ids(config, current_viewer.get("email", ""), tenant_id) if current_viewer["role"] == "manager" else None
     _member = member_person(config, current_viewer) if current_viewer["role"] in ("member", "employee") else None
     people = [person.copy() for person in config["people"] if person["tenantId"] == tenant_id and (_managed is None or person.get("teamId") in _managed) and (_member is None or person.get("id") == _member.get("id"))]
@@ -884,7 +885,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
     buckets = aw_get("/api/0/buckets/")
     def belongs(bucket_id: str) -> bool:
         return bucket_id.startswith(f"tw-{tenant_id}_") if tenant_id != "synova" else not bucket_id.startswith("tw-") or bucket_id.startswith("tw-synova_")
-    buckets = {key: value for key, value in buckets.items() if belongs(key)}
+    buckets = {key: value for key, value in buckets.items() if belongs(key) and value.get("hostname") not in set((config.get("removedHosts") or {}).get(tenant_id, []))}
 
     scope = params.get("scope", ["default"])[0]
     is_manager = current_viewer["role"] == "manager" and scope != "self"
@@ -959,6 +960,8 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
         top_urls = sorted(page_seconds.items(), key=lambda item: item[1], reverse=True)[:8]
         recent_activity.sort(key=lambda item: item.get("timestamp") or "", reverse=True)
         if meta.get("id"): used_person_ids.add(meta["id"])
+        inventory = (config.get("devices", {}).get(f"{tenant_id}:{host}") or {}).get("inventory", {})
+        observed_ip = (config.get("devices", {}).get(f"{tenant_id}:{host}") or {}).get("observedIp")
         people.append({
             "id": meta.get("id") or pid, "host": host,
             "name": meta.get("name") or host.replace(".local", ""),
@@ -966,6 +969,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
             "teamId": meta.get("teamId"), "ouId": meta.get("ouId") or meta.get("teamId"), "scheduleId": meta.get("scheduleId"),
             "email": meta.get("email"), "licenseType": meta.get("licenseType"), "registered": bool(meta), "hasTelemetry": True,
             "device": host.replace(".local", ""), "platform": "macOS" if "Mac" in host else "Desktop",
+            "sessionUser": inventory.get("sessionUser"), "observedIp": observed_ip, "inventory": inventory,
             "status": "online" if online else "offline", "lastSeen": last_seen.isoformat() if last_seen else None,
             "trackedSeconds": round(tracked, 3), "activeSeconds": round(active, 3), "idleSeconds": round(idle, 3),
             "productiveSeconds": round(productive, 3), "focusScore": round(productive / tracked * 100 if tracked else 0),
