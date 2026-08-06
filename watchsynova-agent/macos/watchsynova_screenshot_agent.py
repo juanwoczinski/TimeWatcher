@@ -173,7 +173,7 @@ def sync_heartbeat(config: dict) -> bool:
     return authenticated_json(
         config["server_url"].rstrip("/") + "/ingest/v1/activity-events",
         config["token"],
-        {"bucket": {"id": f"timewatcher-heartbeat_{hostname}", "type": "timewatcher.heartbeat", "client": "timewatcher-agent", "hostname": hostname, "data": {}},
+        {"bucket": {"id": f"timewatcher-heartbeat_{hostname}", "type": "timewatcher.heartbeat", "client": "timewatcher-agent/0.3.0", "hostname": hostname, "data": {}},
          "events": [{"timestamp": now, "duration": 0, "data": {"version": "0.3.0", "platform": "macOS"}}]},
     )
 

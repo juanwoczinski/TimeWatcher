@@ -68,6 +68,7 @@ def default_config() -> dict:
         "blockedHosts": {},
         "devices": {},
         "onboarding": {},
+        "journeyAdjustments": [],
     }
 
 
@@ -460,12 +461,6 @@ def schedule_windows(schedule: dict | None, start: datetime, end: datetime) -> l
     """
     if not schedule:
         return []
-    try:
-        sh, sm = (int(x) for x in str(schedule.get("start", "09:00")).split(":")[:2])
-        eh, em = (int(x) for x in str(schedule.get("end", "18:00")).split(":")[:2])
-        pause = max(0, int(schedule.get("breakMinutes", 0))) * 60
-    except (TypeError, ValueError):
-        return []
     try: local_zone = ZoneInfo(str(schedule.get("timezone") or os.environ.get("TIMEWATCHER_TIMEZONE", "America/Sao_Paulo")))
     except Exception: local_zone = LOCAL_TIMEZONE
     weekdays = {int(day) for day in (schedule.get("weekdays") or [1, 2, 3, 4, 5])}
@@ -477,20 +472,29 @@ def schedule_windows(schedule: dict | None, start: datetime, end: datetime) -> l
     cursor = local_start
     while cursor <= local_end:
         override = exceptions.get(cursor.isoformat()) if isinstance(exceptions, dict) else None
-        if cursor.isoformat() not in holidays and cursor.isoweekday() in weekdays and not (isinstance(override, dict) and override.get("off")):
-            start_hm = override.get("start", schedule.get("start", "09:00")) if isinstance(override, dict) else schedule.get("start", "09:00")
-            end_hm = override.get("end", schedule.get("end", "18:00")) if isinstance(override, dict) else schedule.get("end", "18:00")
-            sh2, sm2 = (int(x) for x in str(start_hm).split(":")[:2]); eh2, em2 = (int(x) for x in str(end_hm).split(":")[:2])
-            ws = datetime(cursor.year, cursor.month, cursor.day, sh2, sm2, tzinfo=local_zone)
-            we = datetime(cursor.year, cursor.month, cursor.day, eh2, em2, tzinfo=local_zone)
-            if we <= ws:  # overnight shifts are supported without ambiguity
-                we += timedelta(days=1)
-            # Deduct the configured interval from the end; this keeps expected
-            # seconds correct without pretending the break was productive.
-            we -= timedelta(seconds=pause)
-            clipped = (max(start, ws.astimezone(timezone.utc)), min(end, we.astimezone(timezone.utc)))
-            if clipped[1] > clipped[0]:
-                windows.append(clipped)
+        # An explicit temporary work exception wins over a holiday; this covers
+        # regional holidays, compensatory workdays and approved schedule swaps.
+        can_work = cursor.isoweekday() in weekdays and cursor.isoformat() not in holidays
+        if isinstance(override, dict) and override.get("work"):
+            can_work = True
+        if can_work and not (isinstance(override, dict) and override.get("off")):
+            shifts = override.get("shifts") if isinstance(override, dict) else None
+            shifts = shifts if isinstance(shifts, list) and shifts else schedule.get("shifts")
+            if not isinstance(shifts, list) or not shifts:
+                shifts = [{"start": schedule.get("start", "09:00"), "end": schedule.get("end", "18:00"), "breakMinutes": schedule.get("breakMinutes", 0)}]
+            for shift in shifts[:4]:
+                try:
+                    start_hm = shift.get("start", schedule.get("start", "09:00")); end_hm = shift.get("end", schedule.get("end", "18:00"))
+                    sh2, sm2 = (int(x) for x in str(start_hm).split(":")[:2]); eh2, em2 = (int(x) for x in str(end_hm).split(":")[:2])
+                    pause = max(0, int(shift.get("breakMinutes", 0))) * 60
+                except (TypeError, ValueError):
+                    continue
+                ws = datetime(cursor.year, cursor.month, cursor.day, sh2, sm2, tzinfo=local_zone)
+                we = datetime(cursor.year, cursor.month, cursor.day, eh2, em2, tzinfo=local_zone)
+                if we <= ws: we += timedelta(days=1)
+                we -= timedelta(seconds=pause)
+                clipped = (max(start, ws.astimezone(timezone.utc)), min(end, we.astimezone(timezone.utc)))
+                if clipped[1] > clipped[0]: windows.append(clipped)
         cursor += timedelta(days=1)
     return windows
 
@@ -498,14 +502,24 @@ def schedule_windows(schedule: dict | None, start: datetime, end: datetime) -> l
 def schedule_metrics(schedule: dict | None, start: datetime, end: datetime, tracked: list[tuple[datetime, datetime]], active: list[tuple[datetime, datetime]], productive: list[tuple[datetime, datetime]]) -> dict:
     planned = schedule_windows(schedule, start, end)
     expected = intervals_duration(planned)
+    active_inside = intersection_duration(active, planned)
+    productive_inside = intersection_duration(productive, planned)
+    tolerance = max(0, int((schedule or {}).get("toleranceMinutes", 0) or 0)) * 60
+    first_observed = min((item[0] for item in active), default=None)
+    first_shift = min((item[0] for item in planned), default=None)
+    late_seconds = max(0.0, (first_observed - first_shift).total_seconds() - tolerance) if first_observed and first_shift else 0.0
     return {
         "expectedSeconds": round(expected, 3),
         "scheduledTrackedSeconds": round(intersection_duration(tracked, planned), 3),
-        "scheduledActiveSeconds": round(intersection_duration(active, planned), 3),
-        "scheduledProductiveSeconds": round(intersection_duration(productive, planned), 3),
+        "scheduledActiveSeconds": round(active_inside, 3),
+        "scheduledProductiveSeconds": round(productive_inside, 3),
         "outsideScheduleSeconds": round(max(0.0, intervals_duration(tracked) - intersection_duration(tracked, planned)), 3),
-        "scheduleAdherence": round(min(100.0, intersection_duration(active, planned) / expected * 100) if expected else 0.0, 1),
-        "productivityIndex": round(min(100.0, intersection_duration(productive, planned) / expected * 100) if expected else 0.0, 1),
+        "scheduleAdherence": round(min(100.0, active_inside / expected * 100) if expected else 0.0, 1),
+        "productivityIndex": round(min(100.0, productive_inside / expected * 100) if expected else 0.0, 1),
+        "lateSeconds": round(late_seconds, 3),
+        # Bank hours compares observed active time with the planned workload;
+        # overtime is visible, but only approved exceptions alter the schedule.
+        "bankSeconds": round(intervals_duration(active) - expected, 3) if (schedule or {}).get("bankHours") else 0.0,
     }
 
 
@@ -661,7 +675,7 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     score = round(productive / tracked_seconds * 100 if tracked_seconds else 0)
     screenshot_count = sum(1 for _ in (DATA_DIR / "screenshots").rglob("*.jpg"))
     person = people[0] if people else {"id": "unassigned", "name": "Sem colaborador", "role": "Colaborador", "scheduleId": None, "deviceIds": []}
-    schedule = next((s for s in config["schedules"] if s["id"] == person.get("scheduleId") and s.get("tenantId") == tenant_id), None)
+    schedule = resolved_schedule(config, person, tenant_id)
     tracked_intervals = merge_intervals(window_segments + web_segments)
     idle_intervals = merge_intervals(idle_segments)
     active_intervals = subtract_intervals(tracked_intervals, idle_intervals)
@@ -717,6 +731,14 @@ def member_person(config: dict, viewer: dict) -> dict | None:
         if person.get("tenantId") == viewer.get("tenantId") and (person.get("email") or "").lower() == email:
             return person
     return None
+
+
+def resolved_schedule(config: dict, person: dict, tenant_id: str) -> dict | None:
+    base = next((s for s in config.get("schedules", []) if s.get("id") == person.get("scheduleId") and s.get("tenantId") == tenant_id), None)
+    if not base:
+        return None
+    override = person.get("scheduleOverride") or {}
+    return {**base, **override, "id": base["id"], "tenantId": tenant_id} if isinstance(override, dict) else base
 
 
 def host_blocked(tenant_id: str, host: str) -> bool:
@@ -789,7 +811,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
         active = max(0.0, tracked - min(idle, tracked))
         pid = re.sub(r"[^a-z0-9-]", "-", host.lower()).strip("-") or "host"
         meta = meta_by_key.get(host) or meta_by_key.get(pid) or {}
-        schedule = next((s for s in config.get("schedules", []) if s.get("id") == meta.get("scheduleId") and s.get("tenantId") == tenant_id), None)
+        schedule = resolved_schedule(config, meta, tenant_id)
         expected = intervals_duration(schedule_windows(schedule, start, end))
         scheduled_active = min(active, expected) if expected else 0.0
         scheduled_productive = min(productive, expected) if expected else 0.0
@@ -1333,7 +1355,15 @@ class Handler(BaseHTTPRequestHandler):
             config = load_config(); tid = params.get("tenant", [current["tenantId"]])[0] if current["role"] == "super_admin" else current["tenantId"]
             state = config.setdefault("onboarding", {}).get(tid, {})
             people = [p for p in config.get("people", []) if p.get("tenantId") == tid]
-            return self.send_json(200, {"tenantId": tid, "steps": {"company": True, "schedule": any(s.get("tenantId") == tid for s in config.get("schedules", [])), "users": bool(people), "installer": bool(config.get("enrollments")), "device": any(p.get("tenantId") == tid and p.get("host") for p in people)}, "state": state})
+            return self.send_json(200, {"tenantId": tid, "steps": {"company": True, "schedule": any(s.get("tenantId") == tid for s in config.get("schedules", [])), "users": bool(people), "installer": any(e.get("tenantId") == tid and parse_timestamp(e.get("expiresAt")) > datetime.now(timezone.utc) for e in config.get("enrollments", [])), "device": any(p.get("tenantId") == tid and p.get("host") for p in people)}, "state": state})
+        if parsed.path == "/dashboard/journey-adjustments":
+            config = load_config(); tid = params.get("tenant", [current["tenantId"]])[0] if current["role"] == "super_admin" else current["tenantId"]
+            items = [x for x in config.get("journeyAdjustments", []) if x.get("tenantId") == tid]
+            if current["role"] == "manager":
+                allowed = managed_team_ids(config, current.get("email", ""), tid)
+                people = {p.get("id"): p for p in config.get("people", [])}
+                items = [x for x in items if people.get(x.get("personId"), {}).get("teamId") in allowed]
+            return self.send_json(200, {"adjustments": sorted(items, key=lambda x: x.get("createdAt", ""), reverse=True)[:200]})
         if parsed.path == "/dashboard/operations":
             if current["role"] not in ("super_admin", "org_admin", "manager"): return self.send_json(403, {"error": "forbidden"})
             config = load_config(); tid = current["tenantId"]
@@ -1442,6 +1472,20 @@ class Handler(BaseHTTPRequestHandler):
                     s_tenant = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
                     schedule = {"id": payload.get("id") or str(uuid.uuid4()), "tenantId": s_tenant, "name": str(payload.get("name", "Jornada"))[:80], "start": str(payload.get("start", "09:00"))[:5], "end": str(payload.get("end", "18:00"))[:5], "breakMinutes": max(0, int(payload.get("breakMinutes", 60))), "weekdays": payload.get("weekdays", [1,2,3,4,5]), "timezone": str(payload.get("timezone", "America/Sao_Paulo")), "holidays": [str(x)[:10] for x in (payload.get("holidays") or [])][:500], "exceptions": payload.get("exceptions") if isinstance(payload.get("exceptions"), dict) else {}, "shifts": payload.get("shifts") if isinstance(payload.get("shifts"), list) else [], "toleranceMinutes": max(0, int(payload.get("toleranceMinutes", 0) or 0)), "bankHours": bool(payload.get("bankHours", False)), "approvalRequired": bool(payload.get("approvalRequired", True))}
                     config["schedules"] = [s for s in config["schedules"] if not (s["id"] == schedule["id"] and s.get("tenantId") == s_tenant)] + [schedule]; save_config(config); audit("schedule.upsert", current["email"], {"id": schedule["id"], "tenantId": s_tenant}); return self.send_json(201, schedule)
+                if parsed.path == "/dashboard/journey-adjustments":
+                    person_id = str(payload.get("personId", "")).strip(); day = str(payload.get("date", ""))[:10]
+                    person = next((p for p in config.get("people", []) if p.get("id") == person_id), None)
+                    if not person or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day): return self.send_json(400, {"error": "person_and_date_required"})
+                    if current["role"] != "super_admin" and person.get("tenantId") != current["tenantId"]: return self.send_json(403, {"error": "forbidden"})
+                    adjustment = {"id": str(uuid.uuid4()), "tenantId": person["tenantId"], "personId": person_id, "date": day, "reason": str(payload.get("reason", ""))[:500], "exception": payload.get("exception") if isinstance(payload.get("exception"), dict) else {}, "status": "pending", "createdBy": current["email"], "createdAt": datetime.now(timezone.utc).isoformat()}
+                    config.setdefault("journeyAdjustments", []).append(adjustment); save_config(config); audit("journey.adjustment.request", current["email"], {"id": adjustment["id"], "personId": person_id}); return self.send_json(201, adjustment)
+                if parsed.path == "/dashboard/journey-adjustments/approve":
+                    adj = next((x for x in config.get("journeyAdjustments", []) if x.get("id") == payload.get("id")), None)
+                    if not adj or adj.get("status") != "pending": return self.send_json(404, {"error": "pending_adjustment_not_found"})
+                    person = next((p for p in config.get("people", []) if p.get("id") == adj.get("personId")), None)
+                    if not person or (current["role"] != "super_admin" and person.get("tenantId") != current["tenantId"]): return self.send_json(403, {"error": "forbidden"})
+                    override = person.setdefault("scheduleOverride", {}); exceptions = override.setdefault("exceptions", {}); exceptions[adj["date"]] = adj.get("exception") or {}
+                    adj["status"] = "approved"; adj["approvedBy"] = current["email"]; adj["approvedAt"] = datetime.now(timezone.utc).isoformat(); save_config(config); audit("journey.adjustment.approve", current["email"], {"id": adj["id"], "personId": person["id"]}); return self.send_json(200, adj)
                 if parsed.path == "/dashboard/people/schedule":
                     ids = payload.get("personIds", []); schedule_id = payload.get("scheduleId")
                     for person in config["people"]:
@@ -1892,6 +1936,14 @@ class Handler(BaseHTTPRequestHandler):
             clean = [{"timestamp": str(e["timestamp"]), "duration": float(e.get("duration", 0)), "data": dict(e.get("data", {}))} for e in events]
             aw_request("POST", f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}", {"id": bucket_id, "type": str(bucket.get("type", "unknown"))[:200], "client": str(bucket.get("client", "timewatcher"))[:200], "hostname": str(bucket.get("hostname", "unknown"))[:200], "data": dict(bucket.get("data", {}))})
             if clean: aw_request("POST", f"/api/0/buckets/{urllib.parse.quote(bucket_id, safe='')}/events", clean)
+            if str(bucket.get("type")) == "timewatcher.heartbeat":
+                hostname = str(bucket.get("hostname", "unknown"))[:200]
+                version = next((str(e.get("data", {}).get("version", "")) for e in reversed(clean) if e.get("data", {}).get("version")), "")
+                if version:
+                    with _CONFIG_LOCK:
+                        config = load_config(); entry = config.setdefault("devices", {}).setdefault(f"{tenant_id}:{hostname}", {})
+                        entry["version"] = version; entry["lastHeartbeatAt"] = datetime.now(timezone.utc).isoformat(); entry["updateRequested"] = False
+                        save_config(config)
             with _CACHE_LOCK: _AW_CACHE.clear()
         except (KeyError, TypeError, ValueError, json.JSONDecodeError): return self.send_json(400, {"error": "invalid_payload"})
         except Exception: return self.send_json(502, {"error": "activity_write_failed"})
