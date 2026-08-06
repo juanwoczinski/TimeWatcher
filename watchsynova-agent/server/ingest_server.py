@@ -235,9 +235,15 @@ def auto_link_device_identity(config: dict, tenant_id: str, hostname: str, inven
             re.sub(r"[^a-z0-9]", "", (p.get("email") or "").split("@", 1)[0].lower()),
             re.sub(r"[^a-z0-9]", "", str(p.get("name", "")).lower()),
         }]
-    if len(candidates) != 1:
+    if len(candidates) > 1:
         return None
-    person = candidates[0]
+    if not candidates:
+        if not user:
+            return None
+        person = {"id": f"agent-{host}", "tenantId": tenant_id, "name": str(inventory.get("sessionUser"))[:120], "title": "Colaborador (confirmar identidade)", "identityPending": True, "host": host, "deviceIds": [host]}
+        config.setdefault("people", []).append(person)
+    else:
+        person = candidates[0]
     existing = canonical_host(person.get("host", "")) if person.get("host") else ""
     if existing and existing != host:
         return None
