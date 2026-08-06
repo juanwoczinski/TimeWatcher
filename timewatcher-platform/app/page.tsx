@@ -158,6 +158,7 @@ type Data = {
     screenshotCount: number;
     urlCount: number;
     webSeconds: number;
+    inputSeconds: number;
     lastSeen: string | null;
     expectedSeconds?: number;
     scheduleAdherence?: number;
@@ -1068,6 +1069,8 @@ type AnalyticsPerson = DirPerson & { webSeconds: number; inputSeconds: number; a
 type AnalyticsTeam = { id: string; name: string; people: number; trackedSeconds: number; activeSeconds: number; productiveSeconds: number; webSeconds: number; inputSeconds: number; presses: number; clicks: number; focusScore: number };
 function ProductivityAnalytics({ d }: { d: Data }) {
   const [report, setReport] = useState<{ people: AnalyticsPerson[]; teams: AnalyticsTeam[] } | null>(null);
+  const selfOnly = d.viewer.role === "member" || d.viewer.role === "employee";
+  const managerView = d.viewer.role === "manager";
   useEffect(() => {
     const q = new URLSearchParams({ period: d.period });
     fetch(`/platform-api/dashboard/analytics?${q}`, { credentials: "same-origin", cache: "no-store" })
@@ -1075,16 +1078,22 @@ function ProductivityAnalytics({ d }: { d: Data }) {
   }, [d.period, d.generatedAt]);
   if (!report) return <State text="Calculando produtividade por pessoa e equipe…" />;
   return <div className="analytics-grid">
-    <article className="card analytics-card"><div className="card-head"><div><h2>Produtividade por colaborador</h2><p>Tempo produtivo, entradas de teclado/mouse e web.</p></div></div><div className="analytics-list">{report.people.slice(0, 6).map((p) => <div className="analytics-row" key={p.id}><span><b>{p.name}</b><small>{p.device}</small></span><span title="Interação de teclado e mouse">⌨ {duration(p.inputSeconds || 0)} · {p.presses.toLocaleString("pt-BR")} teclas</span><span title="Tempo em URLs">◉ {duration(p.webSeconds || 0)}</span><strong>{p.focusScore}%</strong></div>)}</div></article>
-    <article className="card analytics-card"><div className="card-head"><div><h2>Comparativo entre equipes</h2><p>Índice de produtividade com base no tempo real.</p></div></div><div className="analytics-list">{report.teams.length ? report.teams.slice(0, 6).map((t) => <div className="analytics-row team" key={t.id}><span><b>{t.name}</b><small>{t.people} pessoa(s) · {duration(t.activeSeconds)} ativo</small></span><span>⌨ {duration(t.inputSeconds)}</span><span>◉ {duration(t.webSeconds)}</span><strong>{t.focusScore}%</strong></div>) : <State text="Atribua pessoas a uma OU para comparar equipes." />}</div></article>
+    <article className="card analytics-card"><div className="card-head"><div><h2>{selfOnly ? "Meu detalhamento de produtividade" : managerView ? "Produtividade do meu time" : "Produtividade por colaborador"}</h2><p>Tempo produtivo, entradas de teclado/mouse e uso web.</p></div></div><div className="analytics-list">{report.people.slice(0, selfOnly ? 1 : 6).map((p) => <div className="analytics-row" key={p.id}><span><b>{p.name}</b><small>{p.device}</small></span><span title="Interação de teclado e mouse">⌨ {duration(p.inputSeconds || 0)} · {p.presses.toLocaleString("pt-BR")} teclas</span><span title="Tempo em URLs">◉ {duration(p.webSeconds || 0)}</span><strong>{p.focusScore}%</strong></div>)}</div></article>
+    <article className="card analytics-card"><div className="card-head"><div><h2>{selfOnly ? "Meu ritmo de trabalho" : "Comparativo entre equipes"}</h2><p>{selfOnly ? "Interações e uso de aplicações no período selecionado." : "Índice de produtividade com base no tempo real."}</p></div></div><div className="analytics-list">{selfOnly ? <><div className="analytics-row"><span><b>Aplicações</b><small>tempo de janelas ativas</small></span><span>⌨ {duration(d.summary.inputSeconds)}</span><span>◉ {duration(d.summary.webSeconds)}</span><strong>{duration(d.summary.activeSeconds)}</strong></div><div className="analytics-row"><span><b>Jornada</b><small>tempo observado dentro da jornada</small></span><span>Meta {duration(d.summary.expectedSeconds || 0)}</span><span>Ativo {duration(d.summary.scheduledActiveSeconds || 0)}</span><strong>{Math.round(d.summary.scheduleAdherence || 0)}%</strong></div></> : report.teams.length ? report.teams.slice(0, 6).map((t) => <div className="analytics-row team" key={t.id}><span><b>{t.name}</b><small>{t.people} pessoa(s) · {duration(t.activeSeconds)} ativo</small></span><span>⌨ {duration(t.inputSeconds)}</span><span>◉ {duration(t.webSeconds)}</span><strong>{t.focusScore}%</strong></div>) : <State text="Atribua pessoas a uma OU para comparar equipes." />}</div></article>
   </div>;
 }
 function Overview({ d, go }: { d: Data; go: (s: Section) => void }) {
   const s = d.summary,
     total = s.productiveSeconds + s.neutralSeconds + s.unproductiveSeconds || 1,
     max = Math.max(...d.timeline.map((x) => x.seconds), 1);
+  const selfOnly = d.viewer.role === "member" || d.viewer.role === "employee";
+  const managerView = d.viewer.role === "manager";
   return (
     <>
+      <div className="dashboard-context">
+        <div><span>{selfOnly ? "MEU PAINEL" : managerView ? "MEU TIME" : "VISÃO DA ORGANIZAÇÃO"}</span><h2>{selfOnly ? "Seu desempenho no período selecionado" : managerView ? "Produtividade das equipes sob sua gestão" : "Produtividade e operação da organização"}</h2></div>
+        <p>{selfOnly ? "Use este painel para acompanhar jornada, foco, aplicações e URLs do seu dispositivo." : managerView ? "Os dados abaixo incluem apenas pessoas e OUs atribuídas à sua gestão." : "Filtros de período e empresa são aplicados em todas as métricas."}</p>
+      </div>
       <div className="metrics">
         <Metric
           label="Tempo monitorado"
@@ -1105,6 +1114,16 @@ function Overview({ d, go }: { d: Data; go: (s: Section) => void }) {
           label="Sites identificados"
           value={String(s.urlCount)}
           note={s.urlCount ? duration(s.webSeconds) : "Ative o coletor web"}
+        />
+        <Metric
+          label="Teclado e mouse"
+          value={duration(s.inputSeconds)}
+          note={`${d.input.presses.toLocaleString("pt-BR")} teclas · ${d.input.clicks.toLocaleString("pt-BR")} cliques`}
+        />
+        <Metric
+          label="Aderência à jornada"
+          value={`${Math.round(s.scheduleAdherence || 0)}%`}
+          note={`${duration(s.scheduledActiveSeconds || 0)} dentro de ${duration(s.expectedSeconds || 0)}`}
         />
       </div>
       <TrendCard />

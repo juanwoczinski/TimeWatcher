@@ -660,6 +660,7 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
                 signals_by_host[hostname][signal] = max(last_dt, signals_by_host[hostname].get(signal, last_dt))
     presses = sum(int(e.get("data", {}).get("presses", 0)) for e in input_events)
     clicks = sum(int(e.get("data", {}).get("clicks", 0)) for e in input_events)
+    input_seconds = sum(max(0.0, float(e.get("duration", 0))) for e in input_events)
     blocked_hosts = set((config.get("blockedHosts") or {}).get(tenant_id, []))
     def device_health(seen: datetime) -> str:
         age = (end - seen).total_seconds()
@@ -690,7 +691,7 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
         "viewer": current_viewer, "tenant": tenant, "tenants": config["tenants"] if current_viewer["role"] == "super_admin" else [tenant],
         "period": period, "range": {"start": start.isoformat(), "end": end.isoformat()}, "generatedAt": datetime.now(timezone.utc).isoformat(),
         "person": person, "people": people, "schedules": [s for s in config["schedules"] if s["tenantId"] == tenant_id], "schedule": schedule,
-        "summary": {"trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "idleSeconds": round(idle_seconds, 3), "productiveSeconds": round(productive, 3), "neutralSeconds": round(category_seconds["neutral"], 3), "unproductiveSeconds": round(category_seconds["unproductive"], 3), "focusScore": score, "deviceCount": len(devices), "onlineDeviceCount": sum(d["status"] == "online" for d in devices), "screenshotCount": screenshot_count, "urlCount": len(urls), "webSeconds": round(web_total, 3), "lastSeen": max(last_seen_values).isoformat() if last_seen_values else None, **journey},
+        "summary": {"trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "idleSeconds": round(idle_seconds, 3), "productiveSeconds": round(productive, 3), "neutralSeconds": round(category_seconds["neutral"], 3), "unproductiveSeconds": round(category_seconds["unproductive"], 3), "focusScore": score, "deviceCount": len(devices), "onlineDeviceCount": sum(d["status"] == "online" for d in devices), "screenshotCount": screenshot_count, "urlCount": len(urls), "webSeconds": round(web_total, 3), "inputSeconds": round(input_seconds, 3), "lastSeen": max(last_seen_values).isoformat() if last_seen_values else None, **journey},
         "devices": devices, "apps": apps[:100], "urls": urls[:200], "domains": [{"domain": d, "seconds": round(s, 3), "duration": duration_label(s), "classification": classify(d, rules)} for d, s in sorted(domain_seconds.items(), key=lambda item: item[1], reverse=True)],
         "timeline": [{"hour": h, "label": f"{h:02d}h", "seconds": round(hourly[h], 3)} for h in range(24) if hourly[h] > 0], "recent": recent[:100], "input": {"presses": presses, "clicks": clicks},
     }
