@@ -177,6 +177,8 @@ type Data = {
     classification: string;
   }[];
   timeline: { hour: number; label: string; seconds: number }[];
+  interactionTimeline: { hour: number; label: string; presses: number; clicks: number; seconds: number }[];
+  webTimeline: { hour: number; label: string; seconds: number; productiveSeconds: number }[];
   recent: { timestamp: string; duration: number; app: string; title: string }[];
   input: { presses: number; clicks: number };
 };
@@ -1021,23 +1023,24 @@ type TrendPoint = {
   productiveSeconds: number;
   focusScore: number;
 };
-function TrendCard() {
+function TrendCard({ period }: { period: Period }) {
   const [series, setSeries] = useState<TrendPoint[] | null>(null);
+  const days = period === "today" ? 7 : period === "7d" ? 7 : 30;
   useEffect(() => {
-    fetch("/platform-api/dashboard/trends?days=14", {
+    fetch(`/platform-api/dashboard/trends?days=${days}`, {
       credentials: "same-origin",
     })
       .then((r) => (r.ok ? r.json() : null))
       .then((x) => setSeries(x?.series || null))
       .catch(() => {});
-  }, []);
+  }, [days]);
   if (!series) return null;
   const max = Math.max(...series.map((p) => p.trackedSeconds), 1);
   return (
     <article className="card trend-card">
       <div className="card-head">
         <div>
-          <h2>Tendência · 14 dias</h2>
+          <h2>Tendência · {days} dias</h2>
           <p>Tempo monitorado por dia (produtivo destacado) · pré-agregado</p>
         </div>
       </div>
@@ -1064,6 +1067,17 @@ function TrendCard() {
       </div>
     </article>
   );
+}
+function MicroInsights({ d }: { d: Data }) {
+  const interactionMax = Math.max(...d.interactionTimeline.map((p) => p.presses + p.clicks), 1);
+  const webMax = Math.max(...d.webTimeline.map((p) => p.seconds), 1);
+  const domainRows = d.domains.slice(0, 5);
+  return <section className="micro-dashboard">
+    <article className="card heatmap-card"><div className="card-head"><div><h2>Mapa de calor de interação</h2><p>Teclas e cliques por hora. Passe o mouse para detalhar.</p></div></div><div className="heatmap-hours">{d.interactionTimeline.map((p) => { const total = p.presses + p.clicks; const level = Math.min(4, Math.ceil(total / interactionMax * 4)); return <div className={`heat-cell l${level}`} key={p.hour} title={`${p.label}h · ${p.presses} teclas · ${p.clicks} cliques · ${duration(p.seconds)} de atividade`}><b>{p.label}</b><span>{total ? total.toLocaleString("pt-BR") : "—"}</span></div>; })}</div><div className="chart-legend"><span>Menos interação</span><i className="l1"/><i className="l2"/><i className="l3"/><i className="l4"/><span>Mais interação</span></div></article>
+    <article className="card input-chart-card"><div className="card-head"><div><h2>Cliques × teclado por horário</h2><p>Volume de interações de entrada no período.</p></div></div><div className="interaction-bars">{d.interactionTimeline.map((p) => <div className="interaction-col" key={p.hour} title={`${p.label}h · ${p.clicks} cliques / ${p.presses} teclas`}><span className="clicks" style={{height:`${Math.max(1, p.clicks / interactionMax * 100)}%`}}/><span className="presses" style={{height:`${Math.max(1, p.presses / interactionMax * 100)}%`}}/><small>{p.hour % 3 === 0 ? p.label : ""}</small></div>)}</div><div className="chart-legend"><i className="clicks"/><span>Cliques</span><i className="presses"/><span>Teclas</span></div></article>
+    <article className="card web-chart-card"><div className="card-head"><div><h2>Uso web e foco por hora</h2><p>Tempo em URLs; trecho roxo indica uso produtivo.</p></div></div><div className="web-bars">{d.webTimeline.map((p) => <div className="web-col" key={p.hour} title={`${p.label}h · ${duration(p.seconds)} web · ${duration(p.productiveSeconds)} produtivo`}><span style={{height:`${Math.max(1, p.seconds / webMax * 100)}%`}}><b style={{height:`${p.seconds ? Math.min(100, p.productiveSeconds / p.seconds * 100) : 0}%`}}/></span><small>{p.hour % 3 === 0 ? p.label : ""}</small></div>)}</div></article>
+    <article className="card domains-card"><div className="card-head"><div><h2>Domínios que mais consomem tempo</h2><p>Distribuição do uso de URLs.</p></div></div><div className="domain-list">{domainRows.length ? domainRows.map((x) => <div key={x.domain}><span><b>{x.domain}</b><small>{x.classification === "productive" ? "Produtivo" : x.classification === "unproductive" ? "Não produtivo" : "Neutro"}</small></span><em><i style={{width:`${Math.min(100, x.seconds / Math.max(domainRows[0].seconds, 1) * 100)}%`}}/></em><strong>{x.duration}</strong></div>) : <State text="Ainda não há URLs no período." />}</div></article>
+  </section>;
 }
 type AnalyticsPerson = DirPerson & { webSeconds: number; inputSeconds: number; appSeconds: number };
 type AnalyticsTeam = { id: string; name: string; people: number; trackedSeconds: number; activeSeconds: number; productiveSeconds: number; webSeconds: number; inputSeconds: number; presses: number; clicks: number; focusScore: number };
@@ -1094,7 +1108,7 @@ function Overview({ d, go }: { d: Data; go: (s: Section) => void }) {
         <div><span>{selfOnly ? "MEU PAINEL" : managerView ? "MEU TIME" : "VISÃO DA ORGANIZAÇÃO"}</span><h2>{selfOnly ? "Seu desempenho no período selecionado" : managerView ? "Produtividade das equipes sob sua gestão" : "Produtividade e operação da organização"}</h2></div>
         <p>{selfOnly ? "Use este painel para acompanhar jornada, foco, aplicações e URLs do seu dispositivo." : managerView ? "Os dados abaixo incluem apenas pessoas e OUs atribuídas à sua gestão." : "Filtros de período e empresa são aplicados em todas as métricas."}</p>
       </div>
-      <div className="metrics">
+      <div className="metrics dense-metrics">
         <Metric
           label="Tempo monitorado"
           value={duration(s.trackedSeconds)}
@@ -1126,7 +1140,8 @@ function Overview({ d, go }: { d: Data; go: (s: Section) => void }) {
           note={`${duration(s.scheduledActiveSeconds || 0)} dentro de ${duration(s.expectedSeconds || 0)}`}
         />
       </div>
-      <TrendCard />
+      <TrendCard period={d.period} />
+      <MicroInsights d={d} />
       <ProductivityAnalytics d={d} />
       <div className="grid-main">
         <article className="card activity">

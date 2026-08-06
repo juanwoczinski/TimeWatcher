@@ -590,6 +590,7 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     input_events = [event for bucket_id, _ in input_buckets for event in events_for(bucket_id)]
     web_events = [event for group in web_event_groups for event in group]
     app_seconds, domain_seconds, page_seconds, hourly = defaultdict(float), defaultdict(float), defaultdict(float), defaultdict(float)
+    web_hourly, productive_hourly, input_hourly = defaultdict(float), defaultdict(float), defaultdict(lambda: {"presses": 0, "clicks": 0, "seconds": 0.0})
     page_titles, recent = {}, []
     window_segments = [segment for group in window_event_groups for segment in effective_segments(group, start, end)]
     web_segments = [segment for group in web_event_groups for segment in effective_segments(group, start, end)]
@@ -603,6 +604,7 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
         title = str(data.get("title", ""))
         app_seconds[app] += seconds
         hourly[segment_start.astimezone(LOCAL_TIMEZONE).hour] += seconds
+        if classify(app, rules) == "productive": productive_hourly[segment_start.astimezone(LOCAL_TIMEZONE).hour] += seconds
         recent.append({"timestamp": segment_start.isoformat(), "duration": seconds, "app": app, "title": title})
     for segment_start, segment_end, data in web_segments:
         seconds = (segment_end - segment_start).total_seconds()
@@ -614,6 +616,8 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
         clean_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
         domain_seconds[domain] += seconds
         page_seconds[clean_url] += seconds
+        web_hourly[segment_start.astimezone(LOCAL_TIMEZONE).hour] += seconds
+        if classify(domain, rules) == "productive": productive_hourly[segment_start.astimezone(LOCAL_TIMEZONE).hour] += seconds
         page_titles[clean_url] = str(data.get("title", ""))
         if not window_segments:
             hourly[segment_start.astimezone(LOCAL_TIMEZONE).hour] += seconds
@@ -641,6 +645,14 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
         # Keep the displayed percentages arithmetically integral after
         # one-decimal rounding (for example, never show a total of 100.2%).
         urls[0]["share"] = round(urls[0]["share"] + (100.0 - sum(item["share"] for item in urls)), 1)
+
+    for event in input_events:
+        try:
+            hour = parse_timestamp(str(event["timestamp"])).astimezone(LOCAL_TIMEZONE).hour
+            sample = input_hourly[hour]; data = event.get("data", {})
+            sample["presses"] += int(data.get("presses", 0)); sample["clicks"] += int(data.get("clicks", 0)); sample["seconds"] += max(0.0, float(event.get("duration", 0)))
+        except (KeyError, TypeError, ValueError):
+            continue
 
     screenshot_buckets = [(key, value) for key, value in buckets.items() if value.get("type") in ("timewatcher.screenshot", "watchsynova.screenshot")]
     all_buckets = window_buckets + afk_buckets + input_buckets + web_buckets + screenshot_buckets + heartbeat_buckets
@@ -693,7 +705,10 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
         "person": person, "people": people, "schedules": [s for s in config["schedules"] if s["tenantId"] == tenant_id], "schedule": schedule,
         "summary": {"trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "idleSeconds": round(idle_seconds, 3), "productiveSeconds": round(productive, 3), "neutralSeconds": round(category_seconds["neutral"], 3), "unproductiveSeconds": round(category_seconds["unproductive"], 3), "focusScore": score, "deviceCount": len(devices), "onlineDeviceCount": sum(d["status"] == "online" for d in devices), "screenshotCount": screenshot_count, "urlCount": len(urls), "webSeconds": round(web_total, 3), "inputSeconds": round(input_seconds, 3), "lastSeen": max(last_seen_values).isoformat() if last_seen_values else None, **journey},
         "devices": devices, "apps": apps[:100], "urls": urls[:200], "domains": [{"domain": d, "seconds": round(s, 3), "duration": duration_label(s), "classification": classify(d, rules)} for d, s in sorted(domain_seconds.items(), key=lambda item: item[1], reverse=True)],
-        "timeline": [{"hour": h, "label": f"{h:02d}h", "seconds": round(hourly[h], 3)} for h in range(24) if hourly[h] > 0], "recent": recent[:100], "input": {"presses": presses, "clicks": clicks},
+        "timeline": [{"hour": h, "label": f"{h:02d}h", "seconds": round(hourly[h], 3)} for h in range(24) if hourly[h] > 0],
+        "interactionTimeline": [{"hour": h, "label": f"{h:02d}", "presses": input_hourly[h]["presses"], "clicks": input_hourly[h]["clicks"], "seconds": round(input_hourly[h]["seconds"], 3)} for h in range(24)],
+        "webTimeline": [{"hour": h, "label": f"{h:02d}", "seconds": round(web_hourly[h], 3), "productiveSeconds": round(productive_hourly[h], 3)} for h in range(24)],
+        "recent": recent[:100], "input": {"presses": presses, "clicks": clicks},
     }
 
 

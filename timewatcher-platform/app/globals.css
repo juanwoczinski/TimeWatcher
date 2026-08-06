@@ -2604,6 +2604,37 @@ h3 {
 .dashboard-context h2 { margin: 5px 0 0; color: var(--ink); font-size: 20px; letter-spacing: -.025em; }
 .dashboard-context p { max-width: 470px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 @media (max-width: 720px) { .dashboard-context { display: block; } .dashboard-context p { margin-top: 10px; } }
+
+/* Dense, manipulable dashboard primitives */
+.dense-metrics { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
+.dense-metrics .metric { min-height: 88px; padding: 13px 14px; border-radius: 14px; box-shadow: none; }
+.dense-metrics .metric strong { margin: 8px 0 4px; font-size: 23px; }
+.dense-metrics .metric small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.micro-dashboard { display: grid; grid-template-columns: 1.3fr 1fr; gap: 14px; }
+.micro-dashboard .card { min-width: 0; padding: 18px; }
+.micro-dashboard .card-head { margin-bottom: 14px; }
+.micro-dashboard .card-head h2 { font-size: 14px; }
+.micro-dashboard .card-head p { font-size: 11px; }
+.heatmap-hours { display: grid; grid-template-columns: repeat(12, 1fr); gap: 5px; }
+.heat-cell { min-width: 0; height: 45px; padding: 5px; display: grid; align-content: space-between; border: 1px solid #e8edf5; border-radius: 7px; background: #f5f7fb; color: #8190a7; cursor: default; }
+.heat-cell b { font-family: var(--data); font-size: 9px; font-weight: 600; }
+.heat-cell span { font-family: var(--data); font-size: 9px; overflow: hidden; text-overflow: ellipsis; }
+.heat-cell.l1 { background: #e7f7f8; border-color: #d4eef0; color: #277986; }
+.heat-cell.l2 { background: #bcecf0; border-color: #97dfe5; color: #14626d; }
+.heat-cell.l3 { background: #6bcbd6; border-color: #55bcc8; color: #073f48; }
+.heat-cell.l4 { background: #253f86; border-color: #253f86; color: #fff; }
+.chart-legend { display: flex; align-items: center; gap: 6px; margin-top: 12px; color: var(--faint); font-size: 10px; }
+.chart-legend i { width: 12px; height: 8px; display: inline-block; border-radius: 2px; background: #e5eaf2; }
+.chart-legend i.l1 { background: #e7f7f8; }.chart-legend i.l2 { background: #bcecf0; }.chart-legend i.l3 { background: #6bcbd6; }.chart-legend i.l4 { background: #253f86; }.chart-legend i.clicks { background: #60b9db; }.chart-legend i.presses { background: #6b56e8; }
+.interaction-bars,.web-bars { height: 145px; display: flex; align-items: end; gap: 3px; padding-top: 8px; border-bottom: 1px solid var(--line); }
+.interaction-col,.web-col { flex: 1; height: 100%; min-width: 0; display: flex; align-items: end; justify-content: center; gap: 1px; position: relative; }
+.interaction-col span { width: 43%; max-height: 100%; min-height: 1px; border-radius: 3px 3px 0 0; }.interaction-col .clicks { background: #61bbdc; }.interaction-col .presses { background: #6652df; }
+.interaction-col small,.web-col small { position: absolute; bottom: -18px; font-family: var(--data); font-size: 9px; color: var(--faint); }
+.web-bars { margin-bottom: 20px; }.web-col > span { width: 70%; display: block; border-radius: 4px 4px 0 0; background: #bdd5e9; overflow: hidden; position: relative; }.web-col > span > b { display: block; position: absolute; bottom: 0; width: 100%; background: #6a55df; }
+.domain-list { display: grid; gap: 10px; }.domain-list > div { display: grid; grid-template-columns: minmax(110px, 1fr) minmax(70px, 1.1fr) auto; gap: 10px; align-items: center; font-size: 11px; }.domain-list span { min-width: 0; display: grid; gap: 2px; }.domain-list b { overflow: hidden; color: var(--ink); text-overflow: ellipsis; white-space: nowrap; }.domain-list small { color: var(--faint); }.domain-list em { height: 6px; overflow: hidden; border-radius: 9px; background: #eef1f6; }.domain-list em i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #69bfd8, #6754df); }.domain-list strong { color: var(--muted); font-family: var(--data); font-size: 10px; white-space: nowrap; }
+@media (max-width: 1200px) { .dense-metrics { grid-template-columns: repeat(3, 1fr); } .micro-dashboard { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 760px) { .dense-metrics, .micro-dashboard { grid-template-columns: 1fr 1fr; } .heatmap-hours { grid-template-columns: repeat(8, 1fr); } }
+@media (max-width: 520px) { .dense-metrics, .micro-dashboard { grid-template-columns: 1fr; } .heatmap-hours { grid-template-columns: repeat(6, 1fr); } }
 .roster {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
