@@ -785,7 +785,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
 
     people = []; used_person_ids: set = set()
     for host, slot in sorted(hosts.items()):
-        app_seconds: dict = defaultdict(float); page_seconds: dict = defaultdict(float); page_titles: dict = {}; tracked = 0.0; recent_activity = []
+        app_seconds: dict = defaultdict(float); page_seconds: dict = defaultdict(float); page_titles: dict = {}; tracked = 0.0; web_seconds = 0.0; input_seconds = 0.0; recent_activity = []
         for bucket_id in slot["window"]:
             for event in events_for(bucket_id):
                 seconds = max(0.0, float(event.get("duration", 0)))
@@ -797,7 +797,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
                 seconds = max(0.0, float(event.get("duration", 0))); data = event.get("data", {}); raw_url = str(data.get("url", ""))
                 if not raw_url: continue
                 parsed = urllib.parse.urlsplit(raw_url if "://" in raw_url else "https://" + raw_url)
-                clean_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")); page_seconds[clean_url] += seconds; page_titles[clean_url] = str(data.get("title", ""))
+                clean_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")); page_seconds[clean_url] += seconds; web_seconds += seconds; page_titles[clean_url] = str(data.get("title", ""))
                 recent_activity.append({"timestamp": event.get("timestamp"), "kind": "url", "app": str(data.get("app", "Navegador")), "title": page_titles[clean_url], "url": clean_url, "duration": duration_label(seconds)})
         productive = sum(seconds for app, seconds in app_seconds.items() if classify(app, rules) == "productive")
         idle = 0.0
@@ -808,6 +808,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
         for bucket_id in slot["input"]:
             for event in events_for(bucket_id):
                 presses += int(event.get("data", {}).get("presses", 0)); clicks += int(event.get("data", {}).get("clicks", 0))
+                input_seconds += max(0.0, float(event.get("duration", 0)))
         active = max(0.0, tracked - min(idle, tracked))
         pid = re.sub(r"[^a-z0-9-]", "-", host.lower()).strip("-") or "host"
         meta = meta_by_key.get(host) or meta_by_key.get(pid) or {}
@@ -840,6 +841,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
             "expectedSeconds": round(expected, 3), "scheduledActiveSeconds": round(scheduled_active, 3), "scheduledProductiveSeconds": round(scheduled_productive, 3),
             "scheduleAdherence": round(min(100.0, scheduled_active / expected * 100) if expected else 0.0, 1), "productivityIndex": round(min(100.0, scheduled_productive / expected * 100) if expected else 0.0, 1), "outsideScheduleSeconds": round(max(0.0, tracked - min(tracked, expected)) if expected else 0.0, 3), "scheduleName": schedule.get("name") if schedule else None,
             "presses": presses, "clicks": clicks,
+            "inputSeconds": round(input_seconds, 3), "webSeconds": round(web_seconds, 3), "appSeconds": round(sum(app_seconds.values()), 3),
             "topApps": [{"name": app, "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": classify(app, rules)} for app, seconds in top_apps],
             "topUrls": [{"url": url, "domain": urllib.parse.urlsplit(url).hostname or url, "title": page_titles.get(url, ""), "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": classify(urllib.parse.urlsplit(url).hostname or url, rules)} for url, seconds in top_urls],
             "recentActivity": recent_activity[:40],
@@ -858,7 +860,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
             "status": "offline", "lastSeen": None,
             "trackedSeconds": 0, "activeSeconds": 0, "idleSeconds": 0, "productiveSeconds": 0, "focusScore": 0,
             "expectedSeconds": round(intervals_duration(schedule_windows(next((s for s in config.get("schedules", []) if s.get("id") == person.get("scheduleId") and s.get("tenantId") == tenant_id), None), start, end)), 3), "scheduledActiveSeconds": 0, "scheduledProductiveSeconds": 0, "scheduleAdherence": 0, "productivityIndex": 0, "outsideScheduleSeconds": 0, "scheduleName": next((s.get("name") for s in config.get("schedules", []) if s.get("id") == person.get("scheduleId")), None),
-            "presses": 0, "clicks": 0, "topApps": [], "topUrls": [], "recentActivity": [],
+            "presses": 0, "clicks": 0, "inputSeconds": 0, "webSeconds": 0, "appSeconds": 0, "topApps": [], "topUrls": [], "recentActivity": [],
         })
     if current_viewer["role"] in ("member", "employee"):
         me = (current_viewer.get("email") or "").lower()
@@ -872,6 +874,30 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
         "teams": [t for t in config.get("teams", []) if t.get("tenantId") == tenant_id],
         "counts": {"people": len(people), "online": sum(1 for p in people if p["status"] == "online")},
     }
+
+
+def analytics_dashboard(params: dict, current_viewer: dict) -> dict:
+    """Productivity breakdown by person and organizational unit from telemetry."""
+    directory = people_directory(params, current_viewer)
+    config = load_config()
+    team_names = {t.get("id"): t.get("name", "Sem OU") for t in directory.get("teams", [])}
+    groups: dict[str, dict] = {}
+    for person in directory["people"]:
+        team_id = person.get("teamId") or "unassigned"
+        row = groups.setdefault(team_id, {"id": team_id, "name": team_names.get(team_id, "Sem OU"), "people": 0, "trackedSeconds": 0.0, "activeSeconds": 0.0, "productiveSeconds": 0.0, "webSeconds": 0.0, "inputSeconds": 0.0, "presses": 0, "clicks": 0})
+        row["people"] += 1
+        for key in ("trackedSeconds", "activeSeconds", "productiveSeconds", "webSeconds", "inputSeconds", "presses", "clicks"):
+            row[key] += float(person.get(key, 0) or 0)
+    teams = []
+    for row in groups.values():
+        row["focusScore"] = round(row["productiveSeconds"] / row["trackedSeconds"] * 100 if row["trackedSeconds"] else 0.0, 1)
+        for key in ("trackedSeconds", "activeSeconds", "productiveSeconds", "webSeconds", "inputSeconds"):
+            row[key] = round(row[key], 3)
+        row["presses"] = int(row["presses"]); row["clicks"] = int(row["clicks"])
+        teams.append(row)
+    teams.sort(key=lambda row: (-row["focusScore"], -row["productiveSeconds"], row["name"].lower()))
+    people = sorted(directory["people"], key=lambda person: (-person.get("productiveSeconds", 0), person["name"].lower()))
+    return {"tenant": directory["tenant"], "period": directory["period"], "range": directory["range"], "generatedAt": directory["generatedAt"], "people": people, "teams": teams}
 
 
 def tenant_admin_emails(config: dict, tenant_id: str) -> list:
@@ -1386,6 +1412,10 @@ class Handler(BaseHTTPRequestHandler):
             key = ("people", current["role"], current["email"], current["tenantId"], str(params.get("tenant")), str(params.get("period")), str(params.get("start")), str(params.get("end")))
             try: return self.send_json(200, cached(key, lambda: people_directory(params, current)))
             except Exception as error: return self.send_json(502, {"error": "people_unavailable", "detail": str(error)[:240]})
+        if parsed.path == "/dashboard/analytics":
+            key = ("analytics", current["role"], current["email"], current["tenantId"], str(params.get("tenant")), str(params.get("period")), str(params.get("start")), str(params.get("end")))
+            try: return self.send_json(200, cached(key, lambda: analytics_dashboard(params, current)))
+            except Exception as error: return self.send_json(502, {"error": "analytics_unavailable", "detail": str(error)[:240]})
         if parsed.path == "/dashboard/teams":
             return self.list_teams(current, params)
         if parsed.path == "/dashboard/policies":

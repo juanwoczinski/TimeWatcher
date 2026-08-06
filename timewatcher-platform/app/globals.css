@@ -2585,6 +2585,19 @@ h3 {
   .people-toolbar { grid-template-columns: 1fr 1fr; }
   .people-toolbar .section-summary { grid-column: 1 / -1; }
 }
+
+/* Live productivity analytics */
+.analytics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.analytics-card { min-width: 0; }
+.analytics-list { display: flex; flex-direction: column; }
+.analytics-row { display: grid; grid-template-columns: minmax(150px, 1fr) auto auto 48px; gap: 12px; align-items: center; min-height: 54px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.analytics-row:first-child { border-top: 0; }
+.analytics-row > span:first-child { min-width: 0; display: grid; gap: 3px; }
+.analytics-row b { color: var(--ink); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.analytics-row small { color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.analytics-row > strong { color: var(--violet); font-family: var(--data); font-size: 13px; text-align: right; }
+@media (max-width: 900px) { .analytics-grid { grid-template-columns: 1fr; } }
+@media (max-width: 560px) { .analytics-row { grid-template-columns: 1fr auto; } .analytics-row > span:nth-child(2), .analytics-row > span:nth-child(3) { display: none; } }
 .roster {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));

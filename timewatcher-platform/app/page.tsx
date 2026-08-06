@@ -87,6 +87,9 @@ type Device = {
   activeSeconds: number;
   presses: number;
   clicks: number;
+  inputSeconds: number;
+  webSeconds: number;
+  appSeconds: number;
   version?: string | null;
   updateRequested?: boolean;
   assignedPersonId?: string | null;
@@ -1061,6 +1064,21 @@ function TrendCard() {
     </article>
   );
 }
+type AnalyticsPerson = DirPerson & { webSeconds: number; inputSeconds: number; appSeconds: number };
+type AnalyticsTeam = { id: string; name: string; people: number; trackedSeconds: number; activeSeconds: number; productiveSeconds: number; webSeconds: number; inputSeconds: number; presses: number; clicks: number; focusScore: number };
+function ProductivityAnalytics({ d }: { d: Data }) {
+  const [report, setReport] = useState<{ people: AnalyticsPerson[]; teams: AnalyticsTeam[] } | null>(null);
+  useEffect(() => {
+    const q = new URLSearchParams({ period: d.period });
+    fetch(`/platform-api/dashboard/analytics?${q}`, { credentials: "same-origin", cache: "no-store" })
+      .then((r) => r.ok ? r.json() : null).then(setReport).catch(() => {});
+  }, [d.period, d.generatedAt]);
+  if (!report) return <State text="Calculando produtividade por pessoa e equipe…" />;
+  return <div className="analytics-grid">
+    <article className="card analytics-card"><div className="card-head"><div><h2>Produtividade por colaborador</h2><p>Tempo produtivo, entradas de teclado/mouse e web.</p></div></div><div className="analytics-list">{report.people.slice(0, 6).map((p) => <div className="analytics-row" key={p.id}><span><b>{p.name}</b><small>{p.device}</small></span><span title="Interação de teclado e mouse">⌨ {duration(p.inputSeconds || 0)} · {p.presses.toLocaleString("pt-BR")} teclas</span><span title="Tempo em URLs">◉ {duration(p.webSeconds || 0)}</span><strong>{p.focusScore}%</strong></div>)}</div></article>
+    <article className="card analytics-card"><div className="card-head"><div><h2>Comparativo entre equipes</h2><p>Índice de produtividade com base no tempo real.</p></div></div><div className="analytics-list">{report.teams.length ? report.teams.slice(0, 6).map((t) => <div className="analytics-row team" key={t.id}><span><b>{t.name}</b><small>{t.people} pessoa(s) · {duration(t.activeSeconds)} ativo</small></span><span>⌨ {duration(t.inputSeconds)}</span><span>◉ {duration(t.webSeconds)}</span><strong>{t.focusScore}%</strong></div>) : <State text="Atribua pessoas a uma OU para comparar equipes." />}</div></article>
+  </div>;
+}
 function Overview({ d, go }: { d: Data; go: (s: Section) => void }) {
   const s = d.summary,
     total = s.productiveSeconds + s.neutralSeconds + s.unproductiveSeconds || 1,
@@ -1090,6 +1108,7 @@ function Overview({ d, go }: { d: Data; go: (s: Section) => void }) {
         />
       </div>
       <TrendCard />
+      <ProductivityAnalytics d={d} />
       <div className="grid-main">
         <article className="card activity">
           <div className="card-head">
@@ -1654,6 +1673,18 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
               <div>
                 <dt>Aderência</dt>
                 <dd>{Math.round(current.scheduleAdherence || 0)}%</dd>
+              </div>
+              <div>
+                <dt>Teclado e mouse</dt>
+                <dd>{duration(current.inputSeconds || 0)}</dd>
+              </div>
+              <div>
+                <dt>URLs</dt>
+                <dd>{duration(current.webSeconds || 0)}</dd>
+              </div>
+              <div>
+                <dt>Teclas / cliques</dt>
+                <dd>{current.presses.toLocaleString("pt-BR")} / {current.clicks.toLocaleString("pt-BR")}</dd>
               </div>
             </dl>
           </div>
