@@ -136,13 +136,14 @@ type Person = {
   scheduleName?: string | null;
 };
 type Data = {
-  viewer: { username: string; name: string; role: Role; tenantId: string };
+  viewer: { username: string; name: string; role: Role; tenantId: string; onboardingCompletedAt?: string | null };
   tenant: Tenant;
   tenants: Tenant[];
   period: Period;
   range: { start: string; end: string };
   generatedAt: string;
   scope?: ViewScope;
+  selfLink?: { linked: boolean; host?: string | null; candidates: { host: string; name: string }[] };
   person: Person;
   people: Person[];
   schedules: Schedule[];
@@ -660,8 +661,10 @@ function Dashboard() {
     [data, setData] = useState<Data | null>(null),
     [error, setError] = useState(""),
     [loading, setLoading] = useState(true),
-    [refreshing, setRefreshing] = useState(false);
+    [refreshing, setRefreshing] = useState(false),
+    [tourOpen, setTourOpen] = useState(false);
   const requestSequence = useRef(0);
+  const tourChecked = useRef(false);
   const [collapsed, setCollapsed] = useState(false);
   const [density, setDensity] = useState<"comfortable" | "compact">(
     "comfortable",
@@ -722,6 +725,18 @@ function Dashboard() {
       })
       .catch(() => {});
   }, []);
+  useEffect(() => {
+    if (data && !tourChecked.current) {
+      tourChecked.current = true;
+      if (!data.viewer.onboardingCompletedAt) setTourOpen(true);
+    }
+  }, [data]);
+  const finishTour = async () => {
+    setTourOpen(false);
+    try {
+      await fetch("/platform-api/dashboard/me/onboarding-complete", { method: "POST", credentials: "same-origin" });
+    } catch {}
+  };
   const isAdmin =
     data?.viewer.role === "super_admin" || data?.viewer.role === "org_admin";
   const isMember =
@@ -956,6 +971,7 @@ function Dashboard() {
         )}
       </section>
       {data && <ChatWidget d={data} go={setActive} />}
+      {data && tourOpen && <FirstLoginTour d={data} onFinish={finishTour} />}
     </main>
   );
 }
@@ -982,7 +998,7 @@ function Content({
   reload: () => void;
   prefs: Prefs;
 }) {
-  if (active === "Visão geral") return <Overview d={data} go={setActive} />;
+  if (active === "Visão geral") return <Overview d={data} go={setActive} reload={reload} />;
   if (active === "Empresas") return <Companies d={data} reload={reload} />;
   if (active === "Pessoas") return <People d={data} reload={reload} />;
   if (active === "OUs") return <Teams d={data} />;
@@ -999,7 +1015,7 @@ function Content({
         start={start}
         end={end}
         tenant={tenant}
-        scope={scope}
+        scope={scope} reload={reload}
       />
     );
   if (active === "Instaladores") return <Installers d={data} />;
@@ -1010,6 +1026,18 @@ function Content({
 }
 function State({ text }: { text: string }) {
   return <div className="state-card">{text}</div>;
+}
+function FirstLoginTour({ d, onFinish }: { d: Data; onFinish: () => void }) {
+  const [step, setStep] = useState(0);
+  const personalNeedsLink = !d.selfLink?.linked;
+  const steps = [
+    { title: `Bem-vindo ao ${d.tenant.name}`, text: "Este painel transforma a telemetria autorizada do agente em jornada, foco, uso de aplicações e URLs. O conteúdo digitado não é coletado." },
+    { title: "Confira a identidade do dispositivo", text: personalNeedsLink ? "Sua visão pessoal ainda precisa ser vinculada a um dispositivo. Abra Minha visão e confirme o host que pertence a você." : "Seu perfil já está vinculado a um dispositivo. A sua visão sempre mostrará somente essa telemetria." },
+    { title: "Use os filtros para investigar", text: "Altere o período e o escopo para acompanhar atividade, URLs, teclado, mouse e aderência à jornada sem perder o contexto." },
+    { title: "Relatórios e jornadas", text: "Em Relatórios você pode exportar dados reais ou agendar entregas. Administradores também fecham o mês com um snapshot auditável." },
+  ];
+  const current = steps[step];
+  return <div className="tour-backdrop" role="dialog" aria-modal="true" aria-label="Tour inicial"><section className="tour-modal"><span>PRIMEIRO ACESSO · {step + 1}/{steps.length}</span><h2>{current.title}</h2><p>{current.text}</p><div className="tour-progress">{steps.map((_, i)=><i key={i} className={i <= step ? "on" : ""}/>)}</div><footer><button onClick={onFinish}>Pular tour</button>{step + 1 < steps.length ? <button className="primary" onClick={()=>setStep(step+1)}>Continuar</button> : <button className="primary" onClick={onFinish}>Concluir</button>}</footer></section></div>;
 }
 function Metric({
   label,
@@ -1110,7 +1138,19 @@ function ProductivityAnalytics({ d }: { d: Data }) {
     <article className="card analytics-card"><div className="card-head"><div><h2>{selfOnly ? "Meu ritmo de trabalho" : "Comparativo entre equipes"}</h2><p>{selfOnly ? "Interações e uso de aplicações no período selecionado." : "Índice de produtividade com base no tempo real."}</p></div></div><div className="analytics-list">{selfOnly ? <><div className="analytics-row"><span><b>Aplicações</b><small>tempo de janelas ativas</small></span><span>⌨ {duration(d.summary.inputSeconds)}</span><span>◉ {duration(d.summary.webSeconds)}</span><strong>{duration(d.summary.activeSeconds)}</strong></div><div className="analytics-row"><span><b>Jornada</b><small>tempo observado dentro da jornada</small></span><span>Meta {duration(d.summary.expectedSeconds || 0)}</span><span>Ativo {duration(d.summary.scheduledActiveSeconds || 0)}</span><strong>{Math.round(d.summary.scheduleAdherence || 0)}%</strong></div></> : report.teams.length ? report.teams.slice(0, 6).map((t) => <div className="analytics-row team" key={t.id}><span><b>{t.name}</b><small>{t.people} pessoa(s) · {duration(t.activeSeconds)} ativo</small></span><span>⌨ {duration(t.inputSeconds)}</span><span>◉ {duration(t.webSeconds)}</span><strong>{t.focusScore}%</strong></div>) : <State text="Atribua pessoas a uma OU para comparar equipes." />}</div></article>
   </div>;
 }
-function Overview({ d, go }: { d: Data; go: (s: Section) => void }) {
+function SelfDeviceLink({ d, reload }: { d: Data; reload: () => void }) {
+  const [host, setHost] = useState(d.selfLink?.candidates[0]?.host || "");
+  const [saving, setSaving] = useState(false); const [message, setMessage] = useState("");
+  const link = async () => {
+    if (!host) return; setSaving(true); setMessage("");
+    const r = await fetch("/platform-api/dashboard/me/link-device", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify({ host }) });
+    const body = await r.json().catch(() => ({})); setSaving(false);
+    if (!r.ok) return setMessage(body.error === "device_assigned" ? `Este dispositivo já está associado a ${body.person}. Transfira-o em Dispositivos.` : "Não foi possível vincular este dispositivo.");
+    setMessage("Dispositivo vinculado. Carregando seus dados reais…"); reload();
+  };
+  return <article className="card self-link-card"><div><span>CONFIGURAÇÃO NECESSÁRIA</span><h2>Vincule o seu dispositivo ao seu perfil</h2><p>A visão pessoal usa exclusivamente a telemetria do host associado ao seu login. Nenhum dado de outro colaborador será exibido.</p></div>{d.selfLink?.candidates.length ? <div className="self-link-actions"><select value={host} onChange={(e) => setHost(e.target.value)}>{d.selfLink.candidates.map((item) => <option value={item.host} key={item.host}>{item.name}</option>)}</select><button className="primary" disabled={saving} onClick={link}>{saving ? "Vinculando…" : "Vincular meu dispositivo"}</button></div> : <p className="muted">Nenhum dispositivo elegível está conectado. Instale o agente e aguarde a primeira sincronização.</p>}{message && <small>{message}</small>}</article>;
+}
+function Overview({ d, go, reload }: { d: Data; go: (s: Section) => void; reload: () => void }) {
   const s = d.summary,
     total = s.productiveSeconds + s.neutralSeconds + s.unproductiveSeconds || 1,
     max = Math.max(...d.timeline.map((x) => x.seconds), 1);
@@ -1122,6 +1162,7 @@ function Overview({ d, go }: { d: Data; go: (s: Section) => void }) {
         <div><span>{selfOnly ? "MEU PAINEL" : managerView ? "MEU TIME" : "VISÃO DA ORGANIZAÇÃO"}</span><h2>{selfOnly ? "Seu desempenho no período selecionado" : managerView ? "Produtividade das equipes sob sua gestão" : "Produtividade e operação da organização"}</h2></div>
         <p>{selfOnly ? "Use este painel para acompanhar jornada, foco, aplicações e URLs do seu dispositivo." : managerView ? "Os dados abaixo incluem apenas pessoas e OUs atribuídas à sua gestão." : "Filtros de período e empresa são aplicados em todas as métricas."}</p>
       </div>
+      {selfOnly && !d.selfLink?.linked && <SelfDeviceLink d={d} reload={reload} />}
       <div className="metrics dense-metrics">
         <Metric
           label="Tempo monitorado"
@@ -3118,6 +3159,7 @@ function Reports({
   end,
   tenant,
   scope,
+  reload,
 }: {
   d: Data;
   period: Period;
@@ -3125,6 +3167,7 @@ function Reports({
   end: string;
   tenant: string;
   scope: ViewScope;
+  reload: () => void;
 }) {
   const q = new URLSearchParams({ period, tenant, scope });
   const personal = scope === "self" || d.viewer.role === "member" || d.viewer.role === "employee";
@@ -3180,6 +3223,7 @@ function Reports({
         <article className="card report-insight"><span>MAIOR CONSUMO WEB</span><h2>{topDomain?.domain || "Sem URLs"}</h2><p>{topDomain ? `${topDomain.duration} · ${topDomain.classification === "productive" ? "produtivo" : topDomain.classification === "unproductive" ? "não produtivo" : "neutro"}.` : "Aguardando telemetria do navegador."}</p></article>
         <article className="card report-insight"><span>QUALIDADE DA JORNADA</span><h2>{duration(d.summary.idleSeconds)} ocioso</h2><p>{d.schedule ? `${d.schedule.name}: ${d.schedule.start}–${d.schedule.end}.` : "Sem jornada atribuída ao escopo."}</p></article>
       </div>
+      {(d.viewer.role === "super_admin" || d.viewer.role === "org_admin") && <div className="report-admin-grid"><ReportScheduling d={d} /><MonthlyClosing d={d} reload={reload} /></div>}
       <div className="grid-bottom report-breakdown">
         <article className="card">
           <div className="card-head"><div><h2>Composição do tempo</h2><p>Aplicações que explicam o período selecionado.</p></div></div>
@@ -3196,6 +3240,22 @@ function Reports({
       </div>
     </div>
   );
+}
+function ReportScheduling({ d }: { d: Data }) {
+  const [items, setItems] = useState<{id: string; email: string; frequency: string; deliveryStatus?: string; lastSentAt?: string}[]>([]);
+  const [email, setEmail] = useState(d.viewer.username); const [frequency, setFrequency] = useState("weekly"); const [notice, setNotice] = useState("");
+  const load = useCallback(() => fetch("/platform-api/dashboard/report-schedules", { credentials: "same-origin" }).then(r => r.ok ? r.json() : null).then(x => setItems(x?.schedules || [])).catch(() => {}), []);
+  useEffect(() => { load(); }, [load]);
+  const create = async () => { const r = await fetch("/platform-api/dashboard/report-schedules", { method: "POST", headers: {"Content-Type":"application/json"}, credentials: "same-origin", body: JSON.stringify({ email, frequency, period: "7d" }) }); setNotice(r.ok ? "Agendamento salvo. O relatório será enviado por link seguro quando o provedor de e-mail estiver configurado." : "Não foi possível salvar o agendamento."); if (r.ok) load(); };
+  return <article className="card report-admin"><h2>Relatórios agendados</h2><p>Entrega por e-mail de link seguro; a telemetria permanece na plataforma.</p><div className="inline-form"><input type="email" value={email} onChange={e=>setEmail(e.target.value)} /><select value={frequency} onChange={e=>setFrequency(e.target.value)}><option value="daily">Diário</option><option value="weekly">Semanal</option><option value="monthly">Mensal</option></select><button className="primary" onClick={create}>Agendar</button></div>{notice && <small>{notice}</small>}<div className="activity-feed">{items.length ? items.map(x=><div className="activity-row" key={x.id}><span className="activity-what"><strong>{x.frequency === "daily" ? "Diário" : x.frequency === "weekly" ? "Semanal" : "Mensal"}</strong> · {x.email}</span><span className="activity-dur">{x.deliveryStatus === "waiting_mail_provider" ? "Aguardando e-mail" : x.lastSentAt ? `Enviado ${date(x.lastSentAt)}` : "Programado"}</span></div>) : <span className="muted">Nenhum agendamento ativo.</span>}</div></article>;
+}
+function MonthlyClosing({ d, reload }: { d: Data; reload: () => void }) {
+  const [month, setMonth] = useState(new Date().toISOString().slice(0, 7)); const [state, setState] = useState<{preview?: any; closing?: any} | null>(null); const [notice, setNotice] = useState("");
+  const load = useCallback(() => fetch(`/platform-api/dashboard/monthly-closing?month=${month}`, {credentials:"same-origin"}).then(r=>r.ok?r.json():null).then(setState).catch(()=>setState(null)), [month]);
+  useEffect(()=>{load();},[load]);
+  const close = async (action?: string) => { const r = await fetch("/platform-api/dashboard/monthly-closing", {method:"POST",headers:{"Content-Type":"application/json"},credentials:"same-origin",body:JSON.stringify({month,action})}); setNotice(r.ok ? (action ? "Mês reaberto para ajustes." : "Mês fechado com snapshot auditável.") : "Não foi possível atualizar o fechamento."); if(r.ok){load();reload();} };
+  const x = state?.closing || state?.preview;
+  return <article className="card report-admin"><h2>Fechamento mensal</h2><p>Consolida jornada, banco de horas, atrasos e produtividade a partir da telemetria real.</p><div className="inline-form"><input type="month" value={month} onChange={e=>setMonth(e.target.value)} />{state?.closing ? <button onClick={()=>close("reopen")}>Reabrir</button> : <button className="primary" onClick={()=>close()}>Fechar mês</button>}</div>{x && <div className="closing-stats"><span><b>{duration(x.activeSeconds || 0)}</b> ativo</span><span><b>{duration(x.expectedSeconds || 0)}</b> previsto</span><span><b>{duration(x.bankSeconds || 0)}</b> banco</span><span><b>{Math.round(x.scheduleAdherence || 0)}%</b> aderência</span></div>}{notice && <small>{notice}</small>}</article>;
 }
 function Gallery({ device, person, tenantId }: { device: Device; person: string; tenantId: string }) {
   const [items, setItems] = useState<Shot[]>([]);

@@ -342,7 +342,7 @@ def viewer(headers) -> dict | None:
     account = load_config()["accounts"].get(email)
     if not account or account.get("status") != "active":
         return None
-    return {"username": email, "email": email, "name": account.get("name", email), "role": account.get("role", "member"), "tenantId": account.get("tenantId", "synova")}
+    return {"username": email, "email": email, "name": account.get("name", email), "role": account.get("role", "member"), "tenantId": account.get("tenantId", "synova"), "onboardingCompletedAt": account.get("onboardingCompletedAt")}
 
 
 _LOGIN_ATTEMPTS: dict = {}
@@ -380,6 +380,34 @@ def audit(action: str, actor: str = "-", detail: object = None) -> None:
             handle.write(entry + "\n")
     except OSError:
         pass
+
+
+def report_schedule_worker() -> None:
+    """Deliver due report notifications as secure dashboard links, never raw telemetry."""
+    while True:
+        try:
+            now = datetime.now(LOCAL_TIMEZONE)
+            with _CONFIG_LOCK:
+                config = load_config(); changed = False
+                for item in config.get("reportSchedules", []):
+                    if not item.get("enabled") or not item.get("email"): continue
+                    frequency = item.get("frequency", "weekly")
+                    due = frequency == "daily" or (frequency == "weekly" and now.weekday() == 0) or (frequency == "monthly" and now.day == 1)
+                    marker = f"{frequency}:{now.strftime('%Y-%m-%d')}"
+                    if not due or item.get("lastSentMarker") == marker: continue
+                    tenant = next((t for t in config.get("tenants", []) if t.get("id") == item.get("tenantId")), {"name": item.get("tenantId")})
+                    report_url = f"{PUBLIC_URL}/?report=scheduled"
+                    html = f"<p>Seu relatório {frequency} de <strong>{tenant.get('name')}</strong> está disponível.</p><p><a href=\"{report_url}\">Abrir relatório seguro</a></p>"
+                    result = mailer.send(item["email"], f"TimeWatcher · relatório {frequency}", html, f"Relatório disponível: {report_url}")
+                    if result.get("ok"):
+                        item["lastSentAt"] = datetime.now(timezone.utc).isoformat(); item["lastSentMarker"] = marker; item["deliveryStatus"] = "sent"; changed = True
+                        audit("report_schedule.sent", "system", {"id": item.get("id"), "email": item.get("email")})
+                    else:
+                        item["deliveryStatus"] = "waiting_mail_provider" if result.get("skipped") else "delivery_error"; changed = True
+                if changed: save_config(config)
+        except Exception as error:
+            print(f"[reports] scheduler error: {error}", flush=True)
+        time.sleep(60 * 30)
 
 
 def retention_days() -> int:
@@ -605,18 +633,23 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     def belongs(bucket_id: str) -> bool:
         return bucket_id.startswith(f"tw-{tenant_id}_") if tenant_id != "synova" else not bucket_id.startswith("tw-") or bucket_id.startswith("tw-synova_")
     buckets = {key: value for key, value in buckets.items() if belongs(key)}
+    assignable_hosts = telemetry_hosts(buckets)
+    mine = member_person(config, current_viewer)
+    my_host = mine.get("host") if mine else None
+    if current_viewer["role"] in ("super_admin", "org_admin"):
+        linkable_hosts = assignable_hosts
+    elif current_viewer["role"] == "manager":
+        linkable_hosts = assignable_hosts & manager_hosts(config, current_viewer.get("email", ""), tenant_id)
+    else:
+        linkable_hosts = {my_host} if my_host else set()
     # Personal mode is intentionally available to every role.  It narrows an
     # administrator or manager to the person record tied to their login e-mail.
     if scope == "self":
-        mine = member_person(config, current_viewer)
-        my_host = mine.get("host") if mine else None
         buckets = {key: value for key, value in buckets.items() if my_host and value.get("hostname") == my_host}
     elif current_viewer["role"] == "manager":
         allowed_hosts = manager_hosts(config, current_viewer.get("email", ""), tenant_id)
         buckets = {key: value for key, value in buckets.items() if value.get("hostname") in allowed_hosts}
     elif current_viewer["role"] in ("member", "employee"):
-        mine = member_person(config, current_viewer)
-        my_host = mine.get("host") if mine else None
         buckets = {key: value for key, value in buckets.items() if my_host and value.get("hostname") == my_host}
     rules = classification_rules(config, tenant_id)
     window_buckets = [(key, value) for key, value in buckets.items() if value.get("type") == "currentwindow"]
@@ -748,6 +781,7 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     recent.sort(key=lambda item: item.get("timestamp") or "", reverse=True)
     return {
         "viewer": current_viewer, "scope": scope, "tenant": tenant, "tenants": config["tenants"] if current_viewer["role"] == "super_admin" else [tenant],
+        "selfLink": {"linked": bool(my_host), "host": my_host, "candidates": [{"host": host, "name": ((config.get("devices") or {}).get(f"{tenant_id}:{host}") or {}).get("name") or host.replace(".local", "")} for host in sorted(linkable_hosts)]},
         "period": period, "range": {"start": start.isoformat(), "end": end.isoformat()}, "generatedAt": datetime.now(timezone.utc).isoformat(),
         "person": person, "people": people, "schedules": [s for s in config["schedules"] if s["tenantId"] == tenant_id], "schedule": schedule,
         "summary": {"trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "idleSeconds": round(idle_seconds, 3), "productiveSeconds": round(productive, 3), "neutralSeconds": round(category_seconds["neutral"], 3), "unproductiveSeconds": round(category_seconds["unproductive"], 3), "focusScore": score, "deviceCount": len(devices), "onlineDeviceCount": sum(d["status"] == "online" for d in devices), "screenshotCount": screenshot_count, "urlCount": len(urls), "webSeconds": round(web_total, 3), "inputSeconds": round(input_seconds, 3), "lastSeen": max(last_seen_values).isoformat() if last_seen_values else None, **journey},
@@ -757,6 +791,21 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
         "webTimeline": [{"hour": h, "label": f"{h:02d}", "seconds": round(web_hourly[h], 3), "productiveSeconds": round(productive_hourly[h], 3)} for h in range(24)],
         "recent": recent[:100], "input": {"presses": presses, "clicks": clicks},
     }
+
+
+def monthly_closing_preview(config: dict, current_viewer: dict, tenant_id: str, month: str) -> dict:
+    """Build an immutable, auditable monthly workload snapshot from real telemetry."""
+    if not re.fullmatch(r"\d{4}-\d{2}", month or ""):
+        raise ValueError("invalid_month")
+    year, month_number = (int(part) for part in month.split("-"))
+    start = datetime(year, month_number, 1, tzinfo=LOCAL_TIMEZONE)
+    end = datetime(year + 1, 1, 1, tzinfo=LOCAL_TIMEZONE) if month_number == 12 else datetime(year, month_number + 1, 1, tzinfo=LOCAL_TIMEZONE)
+    # bounds() treats a custom end date as inclusive; use the last date of the
+    # target month so that the next month's first day never leaks into closing.
+    last_day = (end - timedelta(days=1)).date().isoformat()
+    snapshot = dashboard_data({"period": ["custom"], "start": [start.date().isoformat()], "end": [last_day], "tenant": [tenant_id], "scope": ["default"]}, {**current_viewer, "tenantId": tenant_id})
+    summary = snapshot["summary"]
+    return {"month": month, "tenantId": tenant_id, "range": snapshot["range"], "people": len(snapshot["people"]), "trackedSeconds": summary["trackedSeconds"], "activeSeconds": summary["activeSeconds"], "productiveSeconds": summary["productiveSeconds"], "idleSeconds": summary["idleSeconds"], "expectedSeconds": summary.get("expectedSeconds", 0), "bankSeconds": summary.get("bankSeconds", 0), "lateSeconds": summary.get("lateSeconds", 0), "scheduleAdherence": summary.get("scheduleAdherence", 0), "focusScore": summary.get("focusScore", 0)}
 
 
 def descendant_ou_ids(config: dict, tenant_id: str, roots: set) -> set:
@@ -794,6 +843,13 @@ def member_person(config: dict, viewer: dict) -> dict | None:
         if person.get("tenantId") == viewer.get("tenantId") and (person.get("email") or "").lower() == email:
             return person
     return None
+
+
+def telemetry_hosts(buckets: dict) -> set:
+    """Hosts that have sent a real, assignable signal (not only stale metadata)."""
+    allowed = {"currentwindow", "afkstatus", "os.hid.input", "timewatcher.heartbeat", "web.tab.current", "currentwebtab"}
+    return {str(bucket.get("hostname")) for bucket in buckets.values()
+            if bucket.get("hostname") and (bucket.get("type") in allowed or "web" in str(bucket.get("type", "")).lower())}
 
 
 def resolved_schedule(config: dict, person: dict, tenant_id: str) -> dict | None:
@@ -1440,6 +1496,18 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/dashboard/schedules":
             config = load_config(); tid = params.get("tenant", [current["tenantId"]])[0] if current["role"] == "super_admin" else current["tenantId"]
             return self.send_json(200, {"schedules": [s for s in config.get("schedules", []) if s.get("tenantId") == tid], "holidays": sorted({h for s in config.get("schedules", []) if s.get("tenantId") == tid for h in (s.get("holidays") or [])})})
+        if parsed.path == "/dashboard/report-schedules":
+            config = load_config(); tid = params.get("tenant", [current["tenantId"]])[0] if current["role"] == "super_admin" else current["tenantId"]
+            if current["role"] not in ("super_admin", "org_admin"): return self.send_json(403, {"error": "forbidden"})
+            return self.send_json(200, {"schedules": [s for s in config.get("reportSchedules", []) if s.get("tenantId") == tid]})
+        if parsed.path == "/dashboard/monthly-closing":
+            if current["role"] not in ("super_admin", "org_admin"): return self.send_json(403, {"error": "forbidden"})
+            tid = params.get("tenant", [current["tenantId"]])[0] if current["role"] == "super_admin" else current["tenantId"]
+            month = params.get("month", [datetime.now(LOCAL_TIMEZONE).strftime("%Y-%m")])[0]
+            config = load_config(); closed = next((c for c in config.get("monthlyClosings", []) if c.get("tenantId") == tid and c.get("month") == month), None)
+            try: preview = monthly_closing_preview(config, current, tid, month)
+            except ValueError: return self.send_json(400, {"error": "invalid_month"})
+            return self.send_json(200, {"preview": preview, "closing": closed})
         if parsed.path == "/dashboard/onboarding":
             if current["role"] not in ("super_admin", "org_admin"): return self.send_json(403, {"error": "forbidden"})
             config = load_config(); tid = params.get("tenant", [current["tenantId"]])[0] if current["role"] == "super_admin" else current["tenantId"]
@@ -1533,6 +1601,42 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/dashboard/avatar":
             if not current: return self.send_json(401, {"error": "unauthenticated"})
             return self.receive_avatar(current)
+        if parsed.path == "/dashboard/me/onboarding-complete":
+            if not current: return self.send_json(401, {"error": "unauthenticated"})
+            with _CONFIG_LOCK:
+                config = load_config(); account = config.get("accounts", {}).get(current["email"])
+                if not account: return self.send_json(404, {"error": "account_not_found"})
+                account["onboardingCompletedAt"] = datetime.now(timezone.utc).isoformat(); save_config(config)
+            audit("onboarding.user.complete", current["email"], {"tenantId": current["tenantId"]})
+            return self.send_json(200, {"ok": True})
+        if parsed.path == "/dashboard/me/link-device":
+            if not current: return self.send_json(401, {"error": "unauthenticated"})
+            try: payload = self.read_json()
+            except Exception: return self.send_json(400, {"error": "invalid_json"})
+            host = str(payload.get("host", "")).strip()[:200]
+            if not host: return self.send_json(400, {"error": "host_required"})
+            with _CONFIG_LOCK:
+                config = load_config(); tenant_id = current["tenantId"]
+                buckets = aw_get("/api/0/buckets/")
+                buckets = {key: value for key, value in buckets.items() if (key.startswith(f"tw-{tenant_id}_") if tenant_id != "synova" else not key.startswith("tw-") or key.startswith("tw-synova_"))}
+                eligible = telemetry_hosts(buckets)
+                if current["role"] == "manager": eligible &= manager_hosts(config, current["email"], tenant_id)
+                elif current["role"] in ("member", "employee"):
+                    existing = member_person(config, current); eligible = {existing.get("host")} if existing and existing.get("host") else set()
+                if host not in eligible: return self.send_json(403, {"error": "device_not_available"})
+                entry = member_person(config, current)
+                owner = next((p for p in config.get("people", []) if p.get("tenantId") == tenant_id and p.get("host") == host and p is not entry), None)
+                if owner and owner.get("email") and owner.get("email", "").lower() != current["email"]:
+                    return self.send_json(409, {"error": "device_assigned", "person": owner.get("name", "outro colaborador")})
+                if entry is None:
+                    entry = owner or {"id": re.sub(r"[^a-z0-9-]", "-", current["email"].split("@")[0].lower()).strip("-") or str(uuid.uuid4()), "tenantId": tenant_id}
+                    if entry not in config.setdefault("people", []): config["people"].append(entry)
+                entry.update({"host": host, "email": current["email"], "name": entry.get("name") or current["name"]})
+                config.setdefault("devices", {}).setdefault(f"{tenant_id}:{host}", {})["personId"] = entry["id"]
+                save_config(config)
+            with _CACHE_LOCK: _AW_CACHE.clear()
+            audit("person.self_link_device", current["email"], {"tenantId": current["tenantId"], "host": host})
+            return self.send_json(200, {"ok": True, "host": host, "person": entry})
         if parsed.path.startswith("/dashboard/"):
             if not current: return self.send_json(401, {"error": "unauthenticated"})
             if not self.authorized_admin(current): return self.send_json(403, {"error": "forbidden"})
@@ -1566,6 +1670,25 @@ class Handler(BaseHTTPRequestHandler):
                     s_tenant = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
                     schedule = {"id": payload.get("id") or str(uuid.uuid4()), "tenantId": s_tenant, "name": str(payload.get("name", "Jornada"))[:80], "start": str(payload.get("start", "09:00"))[:5], "end": str(payload.get("end", "18:00"))[:5], "breakMinutes": max(0, int(payload.get("breakMinutes", 60))), "weekdays": payload.get("weekdays", [1,2,3,4,5]), "timezone": str(payload.get("timezone", "America/Sao_Paulo")), "holidays": [str(x)[:10] for x in (payload.get("holidays") or [])][:500], "exceptions": payload.get("exceptions") if isinstance(payload.get("exceptions"), dict) else {}, "shifts": payload.get("shifts") if isinstance(payload.get("shifts"), list) else [], "toleranceMinutes": max(0, int(payload.get("toleranceMinutes", 0) or 0)), "bankHours": bool(payload.get("bankHours", False)), "approvalRequired": bool(payload.get("approvalRequired", True))}
                     config["schedules"] = [s for s in config["schedules"] if not (s["id"] == schedule["id"] and s.get("tenantId") == s_tenant)] + [schedule]; save_config(config); audit("schedule.upsert", current["email"], {"id": schedule["id"], "tenantId": s_tenant}); return self.send_json(201, schedule)
+                if parsed.path == "/dashboard/report-schedules":
+                    r_tenant = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
+                    email = str(payload.get("email", current["email"])).strip().lower()
+                    frequency = str(payload.get("frequency", "weekly")).lower()
+                    if "@" not in email or frequency not in ("daily", "weekly", "monthly"): return self.send_json(400, {"error": "invalid_schedule"})
+                    entry = {"id": str(uuid.uuid4()), "tenantId": r_tenant, "email": email, "frequency": frequency, "period": str(payload.get("period", "7d"))[:20], "enabled": True, "createdAt": datetime.now(timezone.utc).isoformat(), "createdBy": current["email"], "lastSentAt": None, "delivery": "secure_link"}
+                    config.setdefault("reportSchedules", []).append(entry); save_config(config); audit("report_schedule.create", current["email"], {"id": entry["id"], "tenantId": r_tenant, "email": email}); return self.send_json(201, entry)
+                if parsed.path == "/dashboard/monthly-closing":
+                    c_tenant = payload.get("tenantId", current["tenantId"]) if current["role"] == "super_admin" else current["tenantId"]
+                    month = str(payload.get("month", ""))[:7]
+                    if payload.get("action") == "reopen":
+                        config["monthlyClosings"] = [c for c in config.get("monthlyClosings", []) if not (c.get("tenantId") == c_tenant and c.get("month") == month)]
+                        save_config(config); audit("monthly_closing.reopen", current["email"], {"tenantId": c_tenant, "month": month}); return self.send_json(200, {"ok": True, "status": "open"})
+                    try: snapshot = monthly_closing_preview(config, current, c_tenant, month)
+                    except ValueError: return self.send_json(400, {"error": "invalid_month"})
+                    existing = next((c for c in config.get("monthlyClosings", []) if c.get("tenantId") == c_tenant and c.get("month") == month), None)
+                    if existing: return self.send_json(200, {"closing": existing, "alreadyClosed": True})
+                    closing = {**snapshot, "status": "closed", "closedAt": datetime.now(timezone.utc).isoformat(), "closedBy": current["email"]}
+                    config.setdefault("monthlyClosings", []).append(closing); save_config(config); audit("monthly_closing.close", current["email"], {"tenantId": c_tenant, "month": month}); return self.send_json(201, {"closing": closing})
                 if parsed.path == "/dashboard/journey-adjustments":
                     person_id = str(payload.get("personId", "")).strip(); day = str(payload.get("date", ""))[:10]
                     person = next((p for p in config.get("people", []) if p.get("id") == person_id), None)
@@ -2097,4 +2220,5 @@ if __name__ == "__main__":
     threading.Thread(target=rollup_worker, daemon=True).start()
     threading.Thread(target=digest_worker, daemon=True).start()
     threading.Thread(target=alert_email_worker, daemon=True).start()
+    threading.Thread(target=report_schedule_worker, daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", 5610), Handler).serve_forever()
