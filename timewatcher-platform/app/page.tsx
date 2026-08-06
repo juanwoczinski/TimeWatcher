@@ -11,6 +11,7 @@ import {
 import { AuthScreen } from "./auth-screen";
 
 type Period = "today" | "7d" | "30d" | "custom";
+type ViewScope = "self" | "default";
 type Section =
   | "Visão geral"
   | "Empresas"
@@ -141,6 +142,7 @@ type Data = {
   period: Period;
   range: { start: string; end: string };
   generatedAt: string;
+  scope?: ViewScope;
   person: Person;
   people: Person[];
   schedules: Schedule[];
@@ -654,6 +656,7 @@ function Dashboard() {
     [start, setStart] = useState(""),
     [end, setEnd] = useState(""),
     [tenant, setTenant] = useState(""),
+    [scope, setScope] = useState<ViewScope>("default"),
     [data, setData] = useState<Data | null>(null),
     [error, setError] = useState(""),
     [loading, setLoading] = useState(true),
@@ -671,6 +674,7 @@ function Dashboard() {
     try {
       setError("");
       const q = new URLSearchParams({ period });
+      q.set("scope", scope);
       if (period === "custom" && start && end) {
         q.set("start", start);
         q.set("end", end);
@@ -691,7 +695,7 @@ function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, [period, start, end, tenant]);
+  }, [period, start, end, tenant, scope]);
   const refresh = useCallback(async () => {
     setRefreshing(true);
     await load(true);
@@ -886,6 +890,12 @@ function Dashboard() {
             {data?.generatedAt && ` · painel atualizado ${date(data.generatedAt)}`}
           </div>
           <div className="filters">
+            {data && data.viewer.role !== "member" && data.viewer.role !== "employee" && (
+              <div className="scope-switch" role="group" aria-label="Escopo do painel">
+                <button className={scope === "self" ? "active" : ""} onClick={() => setScope("self")}>Minha visão</button>
+                <button className={scope === "default" ? "active" : ""} onClick={() => setScope("default")}>{data.viewer.role === "manager" ? "Meu time" : "Organização"}</button>
+              </div>
+            )}
             {data?.viewer.role === "super_admin" && (
               <select
                 value={tenant}
@@ -938,6 +948,7 @@ function Dashboard() {
               start={start}
               end={end}
               tenant={tenant}
+              scope={scope}
               reload={load}
               prefs={prefs}
             />
@@ -956,6 +967,7 @@ function Content({
   start,
   end,
   tenant,
+  scope,
   reload,
   prefs,
 }: {
@@ -966,6 +978,7 @@ function Content({
   start: string;
   end: string;
   tenant: string;
+  scope: ViewScope;
   reload: () => void;
   prefs: Prefs;
 }) {
@@ -986,6 +999,7 @@ function Content({
         start={start}
         end={end}
         tenant={tenant}
+        scope={scope}
       />
     );
   if (active === "Instaladores") return <Installers d={data} />;
@@ -1086,7 +1100,7 @@ function ProductivityAnalytics({ d }: { d: Data }) {
   const selfOnly = d.viewer.role === "member" || d.viewer.role === "employee";
   const managerView = d.viewer.role === "manager";
   useEffect(() => {
-    const q = new URLSearchParams({ period: d.period });
+    const q = new URLSearchParams({ period: d.period, scope: d.scope || "default" });
     fetch(`/platform-api/dashboard/analytics?${q}`, { credentials: "same-origin", cache: "no-store" })
       .then((r) => r.ok ? r.json() : null).then(setReport).catch(() => {});
   }, [d.period, d.generatedAt]);
@@ -1100,8 +1114,8 @@ function Overview({ d, go }: { d: Data; go: (s: Section) => void }) {
   const s = d.summary,
     total = s.productiveSeconds + s.neutralSeconds + s.unproductiveSeconds || 1,
     max = Math.max(...d.timeline.map((x) => x.seconds), 1);
-  const selfOnly = d.viewer.role === "member" || d.viewer.role === "employee";
-  const managerView = d.viewer.role === "manager";
+  const selfOnly = d.scope === "self" || d.viewer.role === "member" || d.viewer.role === "employee";
+  const managerView = d.viewer.role === "manager" && !selfOnly;
   return (
     <>
       <div className="dashboard-context">
@@ -3102,14 +3116,20 @@ function Reports({
   start,
   end,
   tenant,
+  scope,
 }: {
   d: Data;
   period: Period;
   start: string;
   end: string;
   tenant: string;
+  scope: ViewScope;
 }) {
-  const q = new URLSearchParams({ period, tenant });
+  const q = new URLSearchParams({ period, tenant, scope });
+  const personal = scope === "self" || d.viewer.role === "member" || d.viewer.role === "employee";
+  const manager = d.viewer.role === "manager" && !personal;
+  const topProductive = d.apps.find((app) => app.classification === "productive");
+  const topDomain = d.domains[0];
   if (period === "custom") {
     q.set("start", start);
     q.set("end", end);
@@ -3118,8 +3138,8 @@ function Reports({
     <div className="page-stack">
       <div className="report-hero">
         <div>
-          <span>RELATÓRIO OPERACIONAL</span>
-          <h2>{d.tenant.name}</h2>
+          <span>{personal ? "RELATÓRIO PESSOAL" : manager ? "RELATÓRIO DO TIME" : "RELATÓRIO EXECUTIVO"}</span>
+          <h2>{personal ? "Meu resumo de produtividade" : d.tenant.name}</h2>
           <p>
             {new Date(d.range.start).toLocaleDateString("pt-BR")} —{" "}
             {new Date(d.range.end).toLocaleDateString("pt-BR")}
@@ -3130,7 +3150,7 @@ function Reports({
           <a href={`/platform-api/dashboard/export.json?${q}`}>Exportar JSON</a>
         </div>
       </div>
-      <div className="metrics">
+      <div className="metrics dense-metrics">
         <Metric
           label="Monitorado"
           value={duration(d.summary.trackedSeconds)}
@@ -3151,16 +3171,23 @@ function Reports({
           value={duration(d.summary.webSeconds)}
           note={`${d.summary.urlCount} URLs`}
         />
+        <Metric label="Interações" value={`${d.input.presses.toLocaleString("pt-BR")} / ${d.input.clicks.toLocaleString("pt-BR")}`} note="teclas / cliques" />
+        <Metric label="Jornada" value={`${Math.round(d.summary.scheduleAdherence || 0)}%`} note={`${duration(d.summary.scheduledActiveSeconds || 0)} dentro da jornada`} />
       </div>
-      <div className="grid-bottom">
+      <div className="report-insight-grid">
+        <article className="card report-insight"><span>SINAL DE FOCO</span><h2>{topProductive?.name || "Sem classificação produtiva"}</h2><p>{topProductive ? `${topProductive.duration} no principal aplicativo produtivo.` : "Defina classificações para transformar o uso em indicador."}</p></article>
+        <article className="card report-insight"><span>MAIOR CONSUMO WEB</span><h2>{topDomain?.domain || "Sem URLs"}</h2><p>{topDomain ? `${topDomain.duration} · ${topDomain.classification === "productive" ? "produtivo" : topDomain.classification === "unproductive" ? "não produtivo" : "neutro"}.` : "Aguardando telemetria do navegador."}</p></article>
+        <article className="card report-insight"><span>QUALIDADE DA JORNADA</span><h2>{duration(d.summary.idleSeconds)} ocioso</h2><p>{d.schedule ? `${d.schedule.name}: ${d.schedule.start}–${d.schedule.end}.` : "Sem jornada atribuída ao escopo."}</p></article>
+      </div>
+      <div className="grid-bottom report-breakdown">
         <article className="card">
-          <h2>Aplicativos para análise</h2>
-          <AppTable apps={d.apps.slice(0, 10)} />
+          <div className="card-head"><div><h2>Composição do tempo</h2><p>Aplicações que explicam o período selecionado.</p></div></div>
+          <AppTable apps={d.apps.slice(0, 6)} />
         </article>
         <article className="card">
-          <h2>Sites principais</h2>
+          <div className="card-head"><div><h2>Uso web para decisão</h2><p>Principais domínios — a lista integral fica em Atividades.</p></div></div>
           {d.urls.length ? (
-            <UrlTable urls={d.urls.slice(0, 10)} />
+            <UrlTable urls={d.urls.slice(0, 5)} />
           ) : (
             <State text="Aguardando telemetria web." />
           )}

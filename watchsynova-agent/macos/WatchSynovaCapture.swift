@@ -26,6 +26,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var modules: [Process] = []
     private var accessibilityModulesStarted = false
     private var accessibilityTimer: Timer?
+    private var interactionTimer: Timer?
+    private var windowTimer: Timer?
+    private var eventMonitors: [Any] = []
+    private var collectedPresses = 0
+    private var collectedClicks = 0
     private var screenCaptureAuthorized = false
     private let screenPromptKey = "timewatcher.screenCapturePromptRequested"
 
@@ -119,6 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(status)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Abrir painel", action: #selector(openCloudDashboard), keyEquivalent: "d"))
+        menu.addItem(NSMenuItem(title: "Permissão de acessibilidade…", action: #selector(openAccessibilitySettings), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Permissão de captura…", action: #selector(openScreenRecordingSettings), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Encerrar TimeWatcher", action: #selector(quit), keyEquivalent: "q"))
@@ -199,24 +205,95 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func requestAccessibilityOnce() {
         let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        // Start the native collectors now.  When the user grants permission
+        // while TimeWatcher is open, the global monitor starts receiving input
+        // without requiring a second install or a background helper process.
+        startAccessibilityModules()
         if AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary) {
-            startAccessibilityModules()
             return
         }
         setStatus("Accessibility permission required once")
         accessibilityTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] timer in
             guard AXIsProcessTrusted() else { return }
             timer.invalidate()
-            self?.startAccessibilityModules()
+            self?.setStatus("Monitoring and secure sync enabled")
         }
     }
 
     private func startAccessibilityModules() {
         guard !accessibilityModulesStarted else { return }
         accessibilityModulesStarted = true
-        startModule("aw-watcher-window")
-        startModule("aw-watcher-input")
+        // The bundled Python watchers run as different executables, so recent
+        // macOS releases treat them as separate TCC clients.  Collect in this
+        // signed TimeWatcher process instead: the permission the user grants
+        // applies to the process actually receiving the global events.
+        startNativeCollectors()
         setStatus("Monitoring and secure sync enabled")
+    }
+
+    // Keep the exact hostname convention used by ActivityWatch so native
+    // events join the device/person already enrolled in the platform.
+    private lazy var hostName: String = {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/scutil")
+        process.arguments = ["--get", "LocalHostName"]
+        process.standardOutput = pipe
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let value = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !value.isEmpty { return value + ".local" }
+        } catch { }
+        return ProcessInfo.processInfo.hostName
+    }()
+    private var localActivityURL: URL { URL(string: "http://127.0.0.1:5600/api/0/buckets/")! }
+
+    private func startNativeCollectors() {
+        ensureBucket(id: "aw-watcher-window_\(hostName)", type: "currentwindow", client: "timewatcher-native-window")
+        ensureBucket(id: "aw-watcher-input_\(hostName)", type: "os.hid.input", client: "timewatcher-native-input")
+        let mask: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
+        if let monitor = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] event in
+            DispatchQueue.main.async {
+                if event.type == .keyDown { self?.collectedPresses += 1 }
+                else { self?.collectedClicks += 1 }
+            }
+        }) { eventMonitors.append(monitor) }
+        emitWindowSample()
+        windowTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.emitWindowSample() }
+        interactionTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in self?.emitInteractionSample() }
+    }
+
+    private func ensureBucket(id: String, type: String, client: String) {
+        var request = URLRequest(url: localActivityURL.appendingPathComponent(id))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["id": id, "type": type, "client": client, "hostname": hostName])
+        URLSession.shared.dataTask(with: request).resume()
+    }
+
+    private func emitActivity(bucket: String, duration: TimeInterval, data: [String: Any]) {
+        var request = URLRequest(url: localActivityURL.appendingPathComponent(bucket).appendingPathComponent("events"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let formatter = ISO8601DateFormatter()
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["timestamp": formatter.string(from: Date()), "duration": duration, "data": data])
+        URLSession.shared.dataTask(with: request).resume()
+    }
+
+    private func emitWindowSample() {
+        let application = NSWorkspace.shared.frontmostApplication
+        let name = application?.localizedName ?? "Não identificado"
+        emitActivity(bucket: "aw-watcher-window_\(hostName)", duration: 5, data: ["app": name, "title": ""])
+    }
+
+    private func emitInteractionSample() {
+        let presses = collectedPresses
+        let clicks = collectedClicks
+        collectedPresses = 0
+        collectedClicks = 0
+        guard presses > 0 || clicks > 0 else { return }
+        emitActivity(bucket: "aw-watcher-input_\(hostName)", duration: 10, data: ["presses": presses, "clicks": clicks])
     }
 
     private func startModule(_ name: String) {
@@ -264,6 +341,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
     }
 
+    @objc private func openAccessibilitySettings() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+    }
+
     @objc private func quit() {
         NSApp.terminate(nil)
     }
@@ -272,6 +353,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timer?.invalidate()
         webTimer?.invalidate()
         accessibilityTimer?.invalidate()
+        interactionTimer?.invalidate()
+        windowTimer?.invalidate()
+        eventMonitors.forEach { NSEvent.removeMonitor($0) }
         for process in modules where process.isRunning { process.terminate() }
     }
 }

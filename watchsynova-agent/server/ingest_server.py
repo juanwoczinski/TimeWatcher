@@ -560,11 +560,18 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     start, end, period = bounds(params)
     config = load_config()
     tenant_id = params.get("tenant", [current_viewer["tenantId"]])[0] if current_viewer["role"] == "super_admin" else current_viewer["tenantId"]
+    scope = params.get("scope", ["default"])[0]
     buckets = aw_get("/api/0/buckets/")
     def belongs(bucket_id: str) -> bool:
         return bucket_id.startswith(f"tw-{tenant_id}_") if tenant_id != "synova" else not bucket_id.startswith("tw-") or bucket_id.startswith("tw-synova_")
     buckets = {key: value for key, value in buckets.items() if belongs(key)}
-    if current_viewer["role"] == "manager":
+    # Personal mode is intentionally available to every role.  It narrows an
+    # administrator or manager to the person record tied to their login e-mail.
+    if scope == "self":
+        mine = member_person(config, current_viewer)
+        my_host = mine.get("host") if mine else None
+        buckets = {key: value for key, value in buckets.items() if my_host and value.get("hostname") == my_host}
+    elif current_viewer["role"] == "manager":
         allowed_hosts = manager_hosts(config, current_viewer.get("email", ""), tenant_id)
         buckets = {key: value for key, value in buckets.items() if value.get("hostname") in allowed_hosts}
     elif current_viewer["role"] in ("member", "employee"):
@@ -700,7 +707,7 @@ def dashboard_data(params: dict, current_viewer: dict) -> dict:
     tenant = next((t for t in config["tenants"] if t["id"] == tenant_id), {"id": tenant_id, "name": tenant_id})
     recent.sort(key=lambda item: item.get("timestamp") or "", reverse=True)
     return {
-        "viewer": current_viewer, "tenant": tenant, "tenants": config["tenants"] if current_viewer["role"] == "super_admin" else [tenant],
+        "viewer": current_viewer, "scope": scope, "tenant": tenant, "tenants": config["tenants"] if current_viewer["role"] == "super_admin" else [tenant],
         "period": period, "range": {"start": start.isoformat(), "end": end.isoformat()}, "generatedAt": datetime.now(timezone.utc).isoformat(),
         "person": person, "people": people, "schedules": [s for s in config["schedules"] if s["tenantId"] == tenant_id], "schedule": schedule,
         "summary": {"trackedSeconds": round(tracked_seconds, 3), "activeSeconds": round(active_seconds, 3), "idleSeconds": round(idle_seconds, 3), "productiveSeconds": round(productive, 3), "neutralSeconds": round(category_seconds["neutral"], 3), "unproductiveSeconds": round(category_seconds["unproductive"], 3), "focusScore": score, "deviceCount": len(devices), "onlineDeviceCount": sum(d["status"] == "online" for d in devices), "screenshotCount": screenshot_count, "urlCount": len(urls), "webSeconds": round(web_total, 3), "inputSeconds": round(input_seconds, 3), "lastSeen": max(last_seen_values).isoformat() if last_seen_values else None, **journey},
@@ -772,7 +779,8 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
         return bucket_id.startswith(f"tw-{tenant_id}_") if tenant_id != "synova" else not bucket_id.startswith("tw-") or bucket_id.startswith("tw-synova_")
     buckets = {key: value for key, value in buckets.items() if belongs(key)}
 
-    is_manager = current_viewer["role"] == "manager"
+    scope = params.get("scope", ["default"])[0]
+    is_manager = current_viewer["role"] == "manager" and scope != "self"
     managed = managed_team_ids(config, current_viewer.get("email", ""), tenant_id) if is_manager else set()
     rules = classification_rules(config, tenant_id)
 
@@ -878,13 +886,13 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
             "expectedSeconds": round(intervals_duration(schedule_windows(next((s for s in config.get("schedules", []) if s.get("id") == person.get("scheduleId") and s.get("tenantId") == tenant_id), None), start, end)), 3), "scheduledActiveSeconds": 0, "scheduledProductiveSeconds": 0, "scheduleAdherence": 0, "productivityIndex": 0, "outsideScheduleSeconds": 0, "scheduleName": next((s.get("name") for s in config.get("schedules", []) if s.get("id") == person.get("scheduleId")), None),
             "presses": 0, "clicks": 0, "inputSeconds": 0, "webSeconds": 0, "appSeconds": 0, "topApps": [], "topUrls": [], "recentActivity": [],
         })
-    if current_viewer["role"] in ("member", "employee"):
+    if scope == "self" or current_viewer["role"] in ("member", "employee"):
         me = (current_viewer.get("email") or "").lower()
         people = [p for p in people if (p.get("email") or "").lower() == me]
     people.sort(key=lambda person: (person["status"] != "online", person["name"].lower()))
     tenant = next((t for t in config["tenants"] if t["id"] == tenant_id), {"id": tenant_id, "name": tenant_id})
     return {
-        "tenant": tenant, "generatedAt": datetime.now(timezone.utc).isoformat(), "period": period,
+        "tenant": tenant, "scope": scope, "generatedAt": datetime.now(timezone.utc).isoformat(), "period": period,
         "range": {"start": start.isoformat(), "end": end.isoformat()}, "people": people,
         "schedules": [s for s in config["schedules"] if s["tenantId"] == tenant_id],
         "teams": [t for t in config.get("teams", []) if t.get("tenantId") == tenant_id],
@@ -1420,16 +1428,16 @@ class Handler(BaseHTTPRequestHandler):
             if current["role"] != "super_admin": return self.send_json(403, {"error": "forbidden"})
             return self.list_audit()
         if parsed.path == "/dashboard/data":
-            key = ("data", current["role"], current["email"], current["tenantId"], str(params.get("tenant")), str(params.get("period")), str(params.get("start")), str(params.get("end")))
+            key = ("data", current["role"], current["email"], current["tenantId"], str(params.get("tenant")), str(params.get("scope")), str(params.get("period")), str(params.get("start")), str(params.get("end")))
             force_refresh = params.get("refresh", ["0"])[0] == "1"
             try: return self.send_json(200, dashboard_data(params, current) if force_refresh else cached(key, lambda: dashboard_data(params, current)))
             except Exception as error: return self.send_json(502, {"error": "dashboard_unavailable", "detail": str(error)[:240]})
         if parsed.path == "/dashboard/people":
-            key = ("people", current["role"], current["email"], current["tenantId"], str(params.get("tenant")), str(params.get("period")), str(params.get("start")), str(params.get("end")))
+            key = ("people", current["role"], current["email"], current["tenantId"], str(params.get("tenant")), str(params.get("scope")), str(params.get("period")), str(params.get("start")), str(params.get("end")))
             try: return self.send_json(200, cached(key, lambda: people_directory(params, current)))
             except Exception as error: return self.send_json(502, {"error": "people_unavailable", "detail": str(error)[:240]})
         if parsed.path == "/dashboard/analytics":
-            key = ("analytics", current["role"], current["email"], current["tenantId"], str(params.get("tenant")), str(params.get("period")), str(params.get("start")), str(params.get("end")))
+            key = ("analytics", current["role"], current["email"], current["tenantId"], str(params.get("tenant")), str(params.get("scope")), str(params.get("period")), str(params.get("start")), str(params.get("end")))
             try: return self.send_json(200, cached(key, lambda: analytics_dashboard(params, current)))
             except Exception as error: return self.send_json(502, {"error": "analytics_unavailable", "detail": str(error)[:240]})
         if parsed.path == "/dashboard/teams":
