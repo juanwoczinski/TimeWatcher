@@ -3,7 +3,10 @@ timewatcher.32-193-139-223.sslip.io {
 		# Installers are versioned by the console and must never be reused from a
 		# browser cache after a new stable agent is published.
 		@installer path /downloads/TimeWatcher-Windows.msi
-		header @installer Cache-Control "no-store, no-cache, must-revalidate"
+		header @installer {
+			-Cache-Control
+			Cache-Control "no-store, no-cache, must-revalidate"
+		}
 
 		# Agent ingestion — bearer-token endpoints only. Restricting to /v1/*
 		# closes the previous /ingest/* proxy that exposed the dashboard API
