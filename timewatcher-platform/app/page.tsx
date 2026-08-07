@@ -3459,11 +3459,11 @@ function Installers({ d }: { d: Data }) {
       });
       const x = await r.json();
       setToken(x.token || "");
-      const packageUrl = x.token ? `/platform-api/dashboard/enrollments/windows?format=cmd&token=${encodeURIComponent(x.token)}` : "";
+      const packageUrl = x.token ? `/platform-api/dashboard/enrollments/windows?format=exe&token=${encodeURIComponent(x.token)}` : "";
       setWindowsPackage(packageUrl);
       if (download && packageUrl) {
         const link = document.createElement("a");
-        link.href = packageUrl; link.download = "Instalar-TimeWatcher-Windows.cmd";
+        link.href = packageUrl;
         document.body.appendChild(link); link.click(); link.remove();
       }
     } finally { setBusy(false); }
@@ -3518,8 +3518,8 @@ function Installers({ d }: { d: Data }) {
             Use apenas no canal seguro da equipe de TI. Ele expira em 7 dias.
           </p>
           <code>{token}</code>
-          {windowsPackage && <a className="download" href={windowsPackage} download="Instalar-TimeWatcher-Windows.cmd">Baixar novamente o instalador configurado</a>}
-          <p>Execute <strong>Instalar-TimeWatcher-Windows.cmd</strong> e confirme a janela de administrador. Ele baixa o MSI validado, instala, inicia o agente e confere a primeira sincronização.</p>
+          {windowsPackage && <a className="download" href={windowsPackage}>Baixar novamente o instalador configurado (.exe)</a>}
+          <p>Execute o arquivo <strong>TimeWatcher-Setup.exe</strong> baixado e confirme a janela de administrador. Ele valida o MSI oficial, instala e inicia a coleta automaticamente.</p>
           <pre>{`SERVER_URL=https://timewatcher.32-193-139-223.sslip.io TENANT_ID=${d.tenant.id} ENROLLMENT_TOKEN=${token}`}</pre>
         </article>
       )}

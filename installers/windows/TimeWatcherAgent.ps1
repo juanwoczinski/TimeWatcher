@@ -41,7 +41,7 @@ function Get-IdleSeconds {
 }
 
 $settings = Get-ItemProperty "HKLM:\Software\TimeWatcher" -ErrorAction SilentlyContinue
-if (-not $settings.ServerUrl -or -not $settings.TenantId -or (-not $settings.EnrollmentToken -and -not $settings.AgentToken)) {
+if (-not $settings.ServerUrl -or (-not $settings.EnrollmentToken -and -not $settings.AgentToken)) {
   Write-AgentLog "ERRO configuracao ausente: reinstale usando o pacote vinculado ao tenant."
   exit 2
 }
@@ -60,9 +60,13 @@ if (-not $agentToken) {
     $enrollmentBody = @{ host = $device; platform = "windows" } | ConvertTo-Json
     $enrollment = Invoke-RestMethod -Method Post -Uri "$($settings.ServerUrl)/ingest/v1/agent-enroll" -Headers $enrollmentHeaders -ContentType "application/json" -Body $enrollmentBody
     $agentToken = [string]$enrollment.agentToken
+    $tenantId = [string]$enrollment.tenantId
     if (-not $agentToken) { throw "Servidor nao retornou a credencial do agente" }
+    if (-not $tenantId) { throw "Servidor nao retornou a empresa do agente" }
     New-Item -Path "HKLM:\Software\TimeWatcher" -Force | Out-Null
     New-ItemProperty -Path "HKLM:\Software\TimeWatcher" -Name "AgentToken" -Value $agentToken -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path "HKLM:\Software\TimeWatcher" -Name "TenantId" -Value $tenantId -PropertyType String -Force | Out-Null
+    $settings = Get-ItemProperty "HKLM:\Software\TimeWatcher" -ErrorAction Stop
     Write-AgentLog "Credencial permanente registrada."
   } catch {
     Write-AgentLog "ERRO no provisionamento: $($_.Exception.Message)"

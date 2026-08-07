@@ -15,7 +15,15 @@ jobs:
       - name: Build MSI
         working-directory: installers/windows
         run: wix build -arch x64 Product.wxs -o TimeWatcher-Windows.msi
+      - name: Build one-click bootstrap
+        run: dotnet publish installers/windows/bootstrap/TimeWatcher.Setup.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
+      - name: Stage Windows artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path installers/windows/artifacts | Out-Null
+          Copy-Item installers/windows/TimeWatcher-Windows.msi installers/windows/artifacts/TimeWatcher-Windows.msi
+          Copy-Item installers/windows/bootstrap/bin/Release/net8.0-windows/win-x64/publish/TimeWatcher-Setup.exe installers/windows/artifacts/TimeWatcher-Setup.exe
       - uses: actions/upload-artifact@v4
         with:
           name: TimeWatcher-Windows-MSI
-          path: installers/windows/TimeWatcher-Windows.msi
+          path: installers/windows/artifacts/*

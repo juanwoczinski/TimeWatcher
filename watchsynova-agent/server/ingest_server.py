@@ -43,6 +43,7 @@ BOOTSTRAP_ADMIN = os.environ.get("TIMEWATCHER_BOOTSTRAP_ADMIN", "")
 PUBLIC_URL = os.environ.get("TIMEWATCHER_PUBLIC_URL", "https://timewatcher.32-193-139-223.sslip.io")
 AUDIT_FILE = DATA_DIR / "audit.log"
 WINDOWS_MSI_FILE = Path(os.environ.get("TIMEWATCHER_WINDOWS_MSI", "/opt/timewatcher-platform/public/downloads/TimeWatcher-Windows.msi"))
+WINDOWS_SETUP_FILE = Path(os.environ.get("TIMEWATCHER_WINDOWS_SETUP", "/opt/timewatcher-platform/public/downloads/TimeWatcher-Setup.exe"))
 RETENTION_DAYS = int(os.environ.get("TIMEWATCHER_RETENTION_DAYS", "180") or "0")
 LOGIN_MAX_ATTEMPTS = 8
 LOGIN_WINDOW_SECONDS = 300
@@ -1828,6 +1829,22 @@ exit /b 0
         self.end_headers()
         self.wfile.write(body)
 
+    def serve_windows_enrollment_executable(self, token: str) -> None:
+        """Serve the immutable bootstrap EXE under a tenant-bound filename."""
+        if not enrollment_tenant(token):
+            return self.send_json(401, {"error": "invalid_or_expired_enrollment"})
+        if not WINDOWS_SETUP_FILE.is_file():
+            return self.send_json(503, {"error": "windows_setup_unavailable"})
+        safe_token = re.sub(r"[^A-Za-z0-9_-]", "", token)
+        body = WINDOWS_SETUP_FILE.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.microsoft.portable-executable")
+        self.send_header("Content-Disposition", f'attachment; filename="TimeWatcher-Setup-{safe_token}.exe"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def authorized_admin(self, current: dict) -> bool:
         return current["role"] in ("super_admin", "org_admin")
 
@@ -1904,8 +1921,18 @@ exit /b 0
                 result = agent_update_manifest(config, tenant_id, hostname, platform_name, current_version)
                 save_config(config)
             return self.send_json(200, result)
+        if parsed.path == "/v1/windows-bootstrap":
+            supplied = self.headers.get("Authorization", "")
+            tenant_id = enrollment_tenant(supplied[7:]) if supplied.startswith("Bearer ") else None
+            if not tenant_id: return self.send_json(401, {"error": "invalid_or_expired_enrollment"})
+            release = (load_config().get("agentReleases") or {}).get("windows") or {}
+            if not release.get("version") or not release.get("url") or not release.get("sha256"):
+                return self.send_json(503, {"error": "windows_release_unavailable"})
+            return self.send_json(200, {"version": release["version"], "url": release["url"], "sha256": release["sha256"]})
         if parsed.path == "/dashboard/enrollments/windows":
-            return self.serve_windows_enrollment_package(str(params.get("token", [""])[0]), params.get("format", [""])[0] == "cmd")
+            token = str(params.get("token", [""])[0]); format_name = params.get("format", [""])[0]
+            if format_name == "exe": return self.serve_windows_enrollment_executable(token)
+            return self.serve_windows_enrollment_package(token, format_name == "cmd")
         if parsed.path.startswith("/dashboard/") and not current: return self.send_json(401, {"error": "unauthenticated"})
         if current and current["role"] in ("member", "employee") and (parsed.path.startswith("/dashboard/screenshots") or parsed.path in ("/dashboard/teams", "/dashboard/alerts", "/dashboard/billing", "/dashboard/policies", "/dashboard/audit", "/dashboard/digests", "/dashboard/trends", "/dashboard/intelligence", "/dashboard/invites")):
             return self.send_json(403, {"error": "forbidden"})

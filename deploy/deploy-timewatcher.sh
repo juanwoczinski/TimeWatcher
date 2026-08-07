@@ -33,8 +33,13 @@ if [[ "$UPLOAD_INSTALLERS" == "1" ]]; then
   fi
   MAC_AGENT_SHA="$(shasum -a 256 "$PROJECT_DIR/timewatcher-platform/public/downloads/TimeWatcher-Agent-macOS.zip" | awk '{print $1}')"
   WINDOWS_MSI="$PROJECT_DIR/timewatcher-platform/public/downloads/TimeWatcher-Windows.msi"
+  WINDOWS_SETUP="$PROJECT_DIR/timewatcher-platform/public/downloads/TimeWatcher-Setup.exe"
   if [[ ! -f "$WINDOWS_MSI" ]]; then
     echo "MSI do Windows não encontrado: gere-o com o workflow Build Windows MSI antes do deploy." >&2
+    exit 1
+  fi
+  if [[ ! -f "$WINDOWS_SETUP" ]]; then
+    echo "Bootstrap EXE do Windows não encontrado: gere-o com o workflow Build Windows MSI antes do deploy." >&2
     exit 1
   fi
   WINDOWS_AGENT_SHA="$(shasum -a 256 "$WINDOWS_MSI" | awk '{print $1}')"
@@ -44,6 +49,7 @@ if [[ "$UPLOAD_INSTALLERS" == "1" ]]; then
     "$PROJECT_DIR/timewatcher-platform/public/downloads/TimeWatcher-Agent-macOS.zip" \
     "$PROJECT_DIR/timewatcher-platform/public/downloads/TimeWatcher-Agent-macOS.zip.sha256" \
     "$WINDOWS_MSI" \
+    "$WINDOWS_SETUP" \
     "$REMOTE_HOST:$REMOTE_STAGE/downloads/"
 fi
 scp -i "$SSH_KEY" \

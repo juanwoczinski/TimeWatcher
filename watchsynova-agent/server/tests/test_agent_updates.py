@@ -113,6 +113,28 @@ class AgentUpdateTests(unittest.TestCase):
         finally:
             server.load_config = original; server.WINDOWS_MSI_FILE = original_msi
 
+    def test_windows_executable_keeps_binary_immutable_and_binds_filename(self):
+        token = "executable-enrollment-token"
+        config = server.default_config()
+        config["enrollments"] = [{"tenantId": "synova", "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "expiresAt": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()}]
+        original = server.load_config; original_setup = server.WINDOWS_SETUP_FILE
+        try:
+            server.load_config = lambda: config
+            with tempfile.TemporaryDirectory() as directory:
+                executable = os.path.join(directory, "TimeWatcher-Setup.exe")
+                with open(executable, "wb") as artifact: artifact.write(b"MZ-test-executable")
+                server.WINDOWS_SETUP_FILE = server.Path(executable)
+                handler = object.__new__(server.Handler); handler.wfile = io.BytesIO(); headers = {}
+                handler.send_response = lambda status: setattr(handler, "status", status)
+                handler.send_header = lambda key, value: headers.__setitem__(key, value)
+                handler.end_headers = lambda: None
+                handler.serve_windows_enrollment_executable(token)
+                self.assertEqual(handler.status, 200)
+                self.assertEqual(handler.wfile.getvalue(), b"MZ-test-executable")
+                self.assertIn(f"TimeWatcher-Setup-{token}.exe", headers["Content-Disposition"])
+        finally:
+            server.load_config = original; server.WINDOWS_SETUP_FILE = original_setup
+
     def test_durable_agent_token_survives_expired_enrollment(self):
         durable = "durable-device-token"
         config = server.default_config()
