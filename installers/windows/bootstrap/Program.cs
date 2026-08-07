@@ -16,6 +16,12 @@ internal static class Program
     private static async Task Main()
     {
         Application.SetHighDpiMode(HighDpiMode.SystemAware);
+        if (Environment.GetCommandLineArgs().Contains("--self-test"))
+        {
+            const string sample = "abcdefghijklmnopqrstuvwxyzABCDEFGH";
+            Environment.ExitCode = EnrollmentToken($"TimeWatcher-Setup-{sample} (1).exe") == sample ? 0 : 1;
+            return;
+        }
         try
         {
             Directory.CreateDirectory(LogDirectory);

@@ -17,6 +17,11 @@ jobs:
         run: wix build -arch x64 Product.wxs -o TimeWatcher-Windows.msi
       - name: Build one-click bootstrap
         run: dotnet publish installers/windows/bootstrap/TimeWatcher.Setup.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
+      - name: Execute bootstrap self-test on Windows
+        shell: pwsh
+        run: |
+          & installers/windows/bootstrap/bin/Release/net8.0-windows/win-x64/publish/TimeWatcher-Setup.exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw "Bootstrap self-test failed with exit code $LASTEXITCODE" }
       - name: Stage Windows artifacts
         shell: pwsh
         run: |
