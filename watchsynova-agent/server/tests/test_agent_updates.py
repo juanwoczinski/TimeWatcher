@@ -148,6 +148,16 @@ class AgentUpdateTests(unittest.TestCase):
         finally:
             server.load_config = original
 
+    def test_install_status_requires_a_real_heartbeat(self):
+        config = server.default_config()
+        config["devices"] = {"synova:pc-01": {"lastSignalAt": "2026-08-07T00:00:00+00:00"}}
+        pending = server.agent_install_status(config, "synova", "PC-01")
+        self.assertFalse(pending["registered"])
+        config["devices"]["synova:pc-01"].update({"lastHeartbeatAt": "2026-08-07T00:01:00+00:00", "version": "0.4.3"})
+        connected = server.agent_install_status(config, "synova", "PC-01")
+        self.assertTrue(connected["registered"])
+        self.assertEqual(connected["version"], "0.4.3")
+
 
 if __name__ == "__main__":
     unittest.main()

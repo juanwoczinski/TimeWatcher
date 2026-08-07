@@ -26,7 +26,10 @@ function Get-Context {
   $handle = [TimeWatcherNative]::GetForegroundWindow()
   $title = New-Object System.Text.StringBuilder 1024
   [void][TimeWatcherNative]::GetWindowText($handle, $title, $title.Capacity)
-  $processId = 0
+  # GetWindowThreadProcessId requires an unsigned 32-bit reference.  Some
+  # Windows/PowerShell combinations reject the default Int32 reference and
+  # would previously abort the whole collection cycle before the heartbeat.
+  $processId = [uint32]0
   [void][TimeWatcherNative]::GetWindowThreadProcessId($handle, [ref]$processId)
   $app = "Windows"
   try { $app = (Get-Process -Id $processId).ProcessName } catch {}
@@ -51,7 +54,7 @@ try {
   if (-not $mutex.WaitOne(0, $false)) { Write-AgentLog "Instancia ja em execucao."; exit 0 }
 } catch {}
 $device = $env:COMPUTERNAME
-$AgentVersion = "0.4.2"
+$AgentVersion = "0.4.3"
 $agentToken = [string]$settings.AgentToken
 if (-not $agentToken) {
   try {
@@ -128,29 +131,42 @@ function Get-DeviceInventory {
 }
 
 while ($true) {
+  # Device presence must never depend on optional desktop sensors.  Send the
+  # heartbeat first and isolate every collector so one unsupported API cannot
+  # make the machine disappear from the console.
   try {
     Test-AgentUpdate
     $now = [DateTime]::UtcNow.ToString("o")
-    $context = Get-Context
-    $idle = Get-IdleSeconds
-    $windowPayload = @{
-      bucket = @{ id = "timewatcher-window_$device"; type = "currentwindow"; client = "timewatcher-windows"; hostname = $device; data = @{ tenantId = $settings.TenantId } }
-      events = @(@{ timestamp = $now; duration = 60; data = $context })
-    } | ConvertTo-Json -Depth 6
-    $afkPayload = @{
-      bucket = @{ id = "timewatcher-afk_$device"; type = "afkstatus"; client = "timewatcher-windows"; hostname = $device; data = @{ tenantId = $settings.TenantId } }
-      events = @(@{ timestamp = $now; duration = 60; data = @{ status = $(if ($idle -ge 300) { "afk" } else { "not-afk" }) } })
-    } | ConvertTo-Json -Depth 6
     $heartbeatPayload = @{
       bucket = @{ id = "timewatcher-heartbeat_$device"; type = "timewatcher.heartbeat"; client = "timewatcher-windows/$AgentVersion"; hostname = $device; data = @{ tenantId = $settings.TenantId } }
       events = @(@{ timestamp = $now; duration = 0; data = @{ version = $AgentVersion; platform = "Windows"; device = (Get-DeviceInventory); update = (Get-UpdateState) } })
     } | ConvertTo-Json -Depth 8
-    Invoke-RestMethod -Method Post -Uri "$($settings.ServerUrl)/ingest/v1/activity-events" -Headers $headers -ContentType "application/json" -Body $windowPayload | Out-Null
-    Invoke-RestMethod -Method Post -Uri "$($settings.ServerUrl)/ingest/v1/activity-events" -Headers $headers -ContentType "application/json" -Body $afkPayload | Out-Null
     Invoke-RestMethod -Method Post -Uri "$($settings.ServerUrl)/ingest/v1/activity-events" -Headers $headers -ContentType "application/json" -Body $heartbeatPayload | Out-Null
     Write-AgentLog "Heartbeat enviado para $device."
   } catch {
-    Write-AgentLog "ERRO de envio: $($_.Exception.Message)"
+    Write-AgentLog "ERRO no heartbeat: $($_.Exception.Message)"
+  }
+  try {
+    $now = [DateTime]::UtcNow.ToString("o")
+    $context = Get-Context
+    $windowPayload = @{
+      bucket = @{ id = "timewatcher-window_$device"; type = "currentwindow"; client = "timewatcher-windows"; hostname = $device; data = @{ tenantId = $settings.TenantId } }
+      events = @(@{ timestamp = $now; duration = 60; data = $context })
+    } | ConvertTo-Json -Depth 6
+    Invoke-RestMethod -Method Post -Uri "$($settings.ServerUrl)/ingest/v1/activity-events" -Headers $headers -ContentType "application/json" -Body $windowPayload | Out-Null
+  } catch {
+    Write-AgentLog "ERRO no coletor de janela: $($_.Exception.Message)"
+  }
+  try {
+    $now = [DateTime]::UtcNow.ToString("o")
+    $idle = Get-IdleSeconds
+    $afkPayload = @{
+      bucket = @{ id = "timewatcher-afk_$device"; type = "afkstatus"; client = "timewatcher-windows"; hostname = $device; data = @{ tenantId = $settings.TenantId } }
+      events = @(@{ timestamp = $now; duration = 60; data = @{ status = $(if ($idle -ge 300) { "afk" } else { "not-afk" }) } })
+    } | ConvertTo-Json -Depth 6
+    Invoke-RestMethod -Method Post -Uri "$($settings.ServerUrl)/ingest/v1/activity-events" -Headers $headers -ContentType "application/json" -Body $afkPayload | Out-Null
+  } catch {
+    Write-AgentLog "ERRO no coletor de inatividade: $($_.Exception.Message)"
   }
   Start-Sleep -Seconds 60
 }

@@ -136,13 +136,24 @@ def save_config(config: dict) -> None:
 
 
 def aw_request(method: str, path: str, payload: object) -> None:
-    request = urllib.request.Request(f"{AW_SERVER}{path}", data=json.dumps(payload).encode(), method=method, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(request, timeout=10):
-            pass
-    except urllib.error.HTTPError as error:
-        if not (method == "POST" and error.code in (304, 400, 409)):
-            raise
+    body = json.dumps(payload).encode()
+    for attempt in range(4):
+        request = urllib.request.Request(f"{AW_SERVER}{path}", data=body, method=method, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=10):
+                return
+        except urllib.error.HTTPError as error:
+            if method == "POST" and error.code in (304, 400, 409):
+                return
+            # ActivityWatch uses SQLite and can briefly report a locked
+            # database while several sensors flush together. Retry this
+            # transient condition instead of dropping the agent signal.
+            if error.code not in (500, 502, 503) or attempt == 3:
+                raise
+        except urllib.error.URLError:
+            if attempt == 3:
+                raise
+        time.sleep(0.15 * (attempt + 1))
 
 
 def aw_get(path: str) -> object:
@@ -358,6 +369,20 @@ def register_device_signal(config: dict, tenant_id: str, hostname: str, client: 
             entry["software"] = sorted({str(item)[:120] for item in inventory["installedSoftware"] if str(item).strip()})[:300]
     if observed_ip and observed_ip not in ("local", "unknown"):
         entry["observedIp"] = observed_ip[:80]
+
+
+def agent_install_status(config: dict, tenant_id: str, hostname: str) -> dict:
+    """Return the authoritative first-heartbeat state used by installers."""
+    host = canonical_host(hostname)
+    entry = (config.get("devices") or {}).get(f"{tenant_id}:{host}") or {}
+    heartbeat = entry.get("lastHeartbeatAt")
+    return {
+        "host": host,
+        "registered": bool(heartbeat),
+        "lastHeartbeatAt": heartbeat,
+        "version": entry.get("version"),
+        "client": entry.get("client"),
+    }
 
 
 def version_key(value: str) -> tuple[int, ...]:
@@ -1929,6 +1954,15 @@ exit /b 0
             if not release.get("version") or not release.get("url") or not release.get("sha256"):
                 return self.send_json(503, {"error": "windows_release_unavailable"})
             return self.send_json(200, {"version": release["version"], "url": release["url"], "sha256": release["sha256"]})
+        if parsed.path == "/v1/agent-install-status":
+            supplied = self.headers.get("Authorization", "")
+            token = supplied[7:] if supplied.startswith("Bearer ") else ""
+            config = load_config()
+            tenant_id = enrollment_tenant(token, config) or ingest_tenant(token)
+            if not tenant_id: return self.send_json(401, {"error": "unauthorized"})
+            hostname = canonical_host(str(params.get("host", [""])[0])[:200])
+            if not hostname: return self.send_json(400, {"error": "host_required"})
+            return self.send_json(200, agent_install_status(config, tenant_id, hostname))
         if parsed.path == "/dashboard/enrollments/windows":
             token = str(params.get("token", [""])[0]); format_name = params.get("format", [""])[0]
             if format_name == "exe": return self.serve_windows_enrollment_executable(token)

@@ -76,8 +76,24 @@ internal static class Program
                 WindowStyle = ProcessWindowStyle.Hidden,
                 Arguments = $"-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{agentScript}\""
             });
-            Log("Instalação concluída; agente iniciado.");
-            MessageBox.Show("TimeWatcher instalado com sucesso. A máquina aparecerá na console em até 1 minuto.", "TimeWatcher", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            Log("Agente iniciado; aguardando confirmação do servidor.");
+            var registered = false;
+            var deadline = DateTimeOffset.UtcNow.AddSeconds(75);
+            while (DateTimeOffset.UtcNow < deadline)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(3));
+                try
+                {
+                    var statusJson = await client.GetStringAsync($"{ServerUrl}/ingest/v1/agent-install-status?host={Uri.EscapeDataString(Environment.MachineName)}");
+                    var status = JsonSerializer.Deserialize<InstallStatus>(statusJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    if (status?.Registered == true) { registered = true; break; }
+                }
+                catch (Exception statusError) { Log($"Confirmação pendente: {statusError.Message}"); }
+            }
+            if (!registered)
+                throw new InvalidOperationException($"O agente foi instalado, mas a estação não confirmou o primeiro envio ao servidor. Consulte {Path.Combine(LogDirectory, "agent.log")}.");
+            Log("Instalação confirmada pelo servidor.");
+            MessageBox.Show("TimeWatcher instalado e conectado com sucesso. Este dispositivo já está disponível na console.", "TimeWatcher", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (System.ComponentModel.Win32Exception error) when (error.NativeErrorCode == 1223)
         {
@@ -109,4 +125,5 @@ internal static class Program
     }
 
     private sealed record Manifest(string Version, string Url, string Sha256);
+    private sealed record InstallStatus(bool Registered, string? LastHeartbeatAt, string? Version);
 }
