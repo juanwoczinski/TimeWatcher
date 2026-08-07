@@ -2605,6 +2605,37 @@ h3 {
 .dashboard-context p { max-width: 470px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 @media (max-width: 720px) { .dashboard-context { display: block; } .dashboard-context p { margin-top: 10px; } }
 
+/* Overview layout — the page deliberately uses a compact command row and
+   equal visual rhythms so real-time telemetry remains easy to scan. */
+.overview-workspace { max-width: 1920px; margin: 0 auto; }
+.overview-workspace > header { align-items: center; margin-bottom: 12px; }
+.overview-workspace > header h1 { margin-bottom: 4px; }
+.overview-workspace .toolbar.advanced { min-height: 42px; margin: 0 0 18px; padding: 8px 10px 8px 12px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.68); }
+.overview-workspace .live { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.overview-workspace .filters { flex-wrap: nowrap; }
+.overview-workspace .scope-switch { flex: 0 0 auto; }
+.overview-workspace .filters select { height: 34px; min-width: 106px; }
+.overview-workspace .dashboard-context { align-items: center; gap: 28px; margin: 0 0 10px; padding: 4px 2px 12px; border-bottom: 1px solid #dfe5ee; }
+.overview-workspace .dashboard-context > div { min-width: 0; }
+.overview-workspace .dashboard-context h2 { font-size: 21px; }
+.overview-workspace .dashboard-context p { padding: 2px 0 2px 14px; border-left: 2px solid #cfd9ed; text-align: left; }
+.overview-workspace .dense-metrics { align-items: stretch; margin-bottom: 2px; }
+.overview-workspace .dense-metrics .metric { min-height: 122px; display: grid; grid-template-rows: auto 1fr auto; align-items: start; padding: 15px 17px; border-radius: 13px; box-shadow: 0 8px 18px rgba(15, 34, 70, .035); }
+.overview-workspace .dense-metrics .metric strong { align-self: center; margin: 5px 0; font-size: clamp(23px, 1.7vw, 29px); line-height: 1; }
+.overview-workspace .dense-metrics .metric small { align-self: end; }
+.overview-workspace .trend-card { margin: 14px 0; }
+.overview-workspace .micro-dashboard { align-items: stretch; }
+.overview-workspace .micro-dashboard .card { min-height: 270px; display: flex; flex-direction: column; }
+.overview-workspace .micro-dashboard .card-head { min-height: 43px; }
+.overview-workspace .heatmap-hours { margin: auto 0 0; }
+.overview-workspace .heatmap-card .chart-legend { margin-top: 14px; }
+.overview-workspace .input-chart-card .interaction-bars { margin-top: auto; }
+.overview-workspace .input-chart-card .chart-legend { min-height: 15px; margin-top: 14px; }
+.overview-workspace .web-chart-card .web-bars { margin-top: auto; }
+.overview-workspace .domains-card .domain-list { margin-top: auto; }
+@media (max-width: 1100px) { .overview-workspace .toolbar.advanced { align-items: stretch; } .overview-workspace .filters { flex-wrap: wrap; justify-content: flex-end; } .overview-workspace .dashboard-context { align-items: flex-start; } }
+@media (max-width: 720px) { .overview-workspace { margin: 0; } .overview-workspace > header { align-items: flex-start; } .overview-workspace .toolbar.advanced { padding: 9px; } .overview-workspace .live { white-space: normal; } .overview-workspace .filters { width: 100%; justify-content: flex-start; } .overview-workspace .dashboard-context { padding-bottom: 12px; } .overview-workspace .dashboard-context p { padding: 10px 0 0; border: 0; } .overview-workspace .dense-metrics .metric { min-height: 106px; } }
+
 /* Dense, manipulable dashboard primitives */
 .dense-metrics { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
 .dense-metrics .metric { min-height: 88px; padding: 13px 14px; border-radius: 14px; box-shadow: none; }

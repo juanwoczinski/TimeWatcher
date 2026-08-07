@@ -908,7 +908,7 @@ function Dashboard() {
           )}
         </div>
       </aside>
-      <section className="workspace">
+      <section className={`workspace${active === "Visão geral" ? " overview-workspace" : ""}`}>
         <header>
           <div>
             <p className="eyebrow">
