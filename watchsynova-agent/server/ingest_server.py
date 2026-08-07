@@ -48,6 +48,8 @@ LOGIN_MAX_ATTEMPTS = 8
 LOGIN_WINDOW_SECONDS = 300
 PRODUCTIVE = {"chatgpt", "codex", "terminal", "visual studio code", "code", "xcode", "figma", "notion", "slack", "zoom", "meet", "docs", "drive", "github"}
 UNPRODUCTIVE = {"instagram", "facebook", "tiktok", "youtube", "netflix", "reddit", "twitter", "x.com"}
+PRODUCTIVITY_SCORE_VERSION = "1.0"
+PRODUCTIVITY_SCORE_WEIGHTS = {"apps": 30, "urls": 20, "schedule": 25, "utilization": 15, "interaction": 10}
 
 
 def default_config() -> dict:
@@ -210,6 +212,88 @@ def billing_summary(config: dict, tenant_id: str) -> dict:
             {"id": "intelligence", "name": "Intelligence", "price": prices["intelligence"], "features": ["Tudo do Essential", "Entra na análise de IA", "Perguntas em linguagem natural", "Resumos e recomendações"]},
         ],
     }
+
+
+def _classified_quality(categories: dict) -> float | None:
+    """Productive=100, neutral=50 and unproductive=0 over observed time."""
+    total = sum(max(0.0, float(categories.get(key, 0) or 0)) for key in ("productive", "neutral", "unproductive"))
+    if total <= 0:
+        return None
+    return min(100.0, max(0.0, (float(categories.get("productive", 0) or 0) + .5 * float(categories.get("neutral", 0) or 0)) / total * 100))
+
+
+def productivity_score(metrics: dict) -> dict:
+    """Transparent productivity score used by people, OUs and organization.
+
+    Missing collectors do not masquerade as poor performance: the raw score is
+    normalized over available components and then receives a bounded coverage
+    adjustment. Coverage and gaps are always returned alongside the score.
+    """
+    tracked = max(0.0, float(metrics.get("trackedSeconds", 0) or 0))
+    active = max(0.0, float(metrics.get("activeSeconds", 0) or 0))
+    expected = max(0.0, float(metrics.get("expectedSeconds", 0) or 0))
+    input_seconds = max(0.0, float(metrics.get("inputSeconds", 0) or 0))
+    interactions = max(0.0, float(metrics.get("presses", 0) or 0) + float(metrics.get("clicks", 0) or 0))
+    has_window = bool(metrics.get("hasWindowSignal", tracked > 0))
+    has_afk = bool(metrics.get("hasAfkSignal", False))
+    has_web = bool(metrics.get("hasWebSignal", False))
+    has_input = bool(metrics.get("hasInputSignal", False))
+    has_schedule = expected > 0
+
+    app_score = _classified_quality(metrics.get("appCategories") or {})
+    url_score = _classified_quality(metrics.get("urlCategories") or {})
+    schedule_score = min(100.0, max(0.0, float(metrics.get("scheduledActiveSeconds", 0) or 0) / expected * 100)) if has_schedule else None
+    utilization_score = min(100.0, active / tracked * 100) if tracked > 0 else None
+    interaction_score = None
+    if has_input and active > 0:
+        input_presence = min(1.0, input_seconds / max(active * .08, 1.0))
+        interactions_per_hour = interactions / max(active / 3600.0, .25)
+        interaction_score = min(100.0, (input_presence * .6 + min(1.0, interactions_per_hour / 180.0) * .4) * 100)
+
+    values = {"apps": app_score, "urls": url_score, "schedule": schedule_score, "utilization": utilization_score, "interaction": interaction_score}
+    available_weight = sum(PRODUCTIVITY_SCORE_WEIGHTS[key] for key, value in values.items() if value is not None)
+    raw_score = sum(float(value) * PRODUCTIVITY_SCORE_WEIGHTS[key] for key, value in values.items() if value is not None) / available_weight if available_weight else 0.0
+
+    coverage_checks = {"apps": has_window, "afk": has_afk, "urls": has_web, "input": has_input, "schedule": has_schedule}
+    coverage_weights = {"apps": 30, "afk": 15, "urls": 15, "input": 15, "schedule": 25}
+    coverage = sum(coverage_weights[key] for key, present in coverage_checks.items() if present)
+    adjusted = raw_score * (.75 + .25 * coverage / 100.0) if available_weight else 0.0
+    sufficient = tracked >= 900 and coverage >= 45
+    confidence = "high" if coverage >= 80 and tracked >= 3600 else "medium" if sufficient else "low"
+    labels = {"apps": "Aplicações", "urls": "URLs", "schedule": "Jornada", "utilization": "Tempo ativo", "interaction": "Interação"}
+    components = {key: {"label": labels[key], "weight": PRODUCTIVITY_SCORE_WEIGHTS[key], "score": round(value, 1) if value is not None else None, "available": value is not None} for key, value in values.items()}
+    gap_labels = {"apps": "aplicações", "afk": "ociosidade", "urls": "URLs", "input": "teclado e mouse", "schedule": "jornada"}
+    return {
+        "version": PRODUCTIVITY_SCORE_VERSION,
+        "score": round(adjusted, 1),
+        "rawScore": round(raw_score, 1),
+        "coverage": round(float(coverage), 1),
+        "confidence": confidence,
+        "sufficientData": sufficient,
+        "components": components,
+        "missingSignals": [gap_labels[key] for key, present in coverage_checks.items() if not present],
+        "monitoredSeconds": round(tracked, 3),
+    }
+
+
+def aggregate_productivity_scores(people: list[dict]) -> dict:
+    """Expected-hours weighted roll-up; scheduled people without data count."""
+    if not people:
+        return {"score": 0.0, "coverage": 0.0, "confidence": "low", "sufficientData": False, "people": 0, "peopleWithData": 0, "peopleInsufficient": 0, "version": PRODUCTIVITY_SCORE_VERSION}
+    weighted_score = weighted_coverage = total_weight = 0.0
+    with_data = insufficient = 0
+    for person in people:
+        result = person.get("productivityScore") or {}
+        expected = max(0.0, float(person.get("expectedSeconds", 0) or 0))
+        tracked = max(0.0, float(person.get("trackedSeconds", 0) or 0))
+        weight = expected if expected > 0 else tracked if tracked > 0 else 900.0
+        weighted_score += float(result.get("score", 0) or 0) * weight
+        weighted_coverage += float(result.get("coverage", 0) or 0) * weight
+        total_weight += weight
+        if tracked > 0: with_data += 1
+        if not result.get("sufficientData"): insufficient += 1
+    coverage = weighted_coverage / total_weight if total_weight else 0.0
+    return {"score": round(weighted_score / total_weight if total_weight else 0.0, 1), "coverage": round(coverage, 1), "confidence": "high" if coverage >= 80 else "medium" if coverage >= 55 else "low", "sufficientData": insufficient == 0 and with_data > 0, "people": len(people), "peopleWithData": with_data, "peopleInsufficient": insufficient, "version": PRODUCTIVITY_SCORE_VERSION}
 
 
 def device_allowed(config: dict, tenant_id: str, hostname: str) -> bool:
@@ -1070,7 +1154,9 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
                 parsed = urllib.parse.urlsplit(raw_url if "://" in raw_url else "https://" + raw_url)
                 clean_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")); page_seconds[clean_url] += seconds; web_seconds += seconds; page_titles[clean_url] = str(data.get("title", ""))
                 recent_activity.append({"timestamp": event.get("timestamp"), "kind": "url", "app": str(data.get("app", "Navegador")), "title": page_titles[clean_url], "url": clean_url, "duration": duration_label(seconds)})
-        productive = sum(seconds for app, seconds in app_seconds.items() if classify(app, rules) == "productive")
+        app_categories = {category: sum(seconds for app, seconds in app_seconds.items() if classify(app, rules) == category) for category in ("productive", "neutral", "unproductive")}
+        url_categories = {category: sum(seconds for url, seconds in page_seconds.items() if classify(urllib.parse.urlsplit(url).hostname or url, rules) == category) for category in ("productive", "neutral", "unproductive")}
+        productive = app_categories["productive"]
         idle = 0.0
         for bucket_id in slot["afk"]:
             for event in events_for(bucket_id):
@@ -1087,6 +1173,14 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
         expected = intervals_duration(schedule_windows(schedule, start, end))
         scheduled_active = min(active, expected) if expected else 0.0
         scheduled_productive = min(productive, expected) if expected else 0.0
+        score_detail = productivity_score({
+            "trackedSeconds": tracked, "activeSeconds": active, "expectedSeconds": expected,
+            "scheduledActiveSeconds": scheduled_active, "inputSeconds": input_seconds,
+            "presses": presses, "clicks": clicks, "appCategories": app_categories,
+            "urlCategories": url_categories, "hasWindowSignal": bool(slot["window"]),
+            "hasAfkSignal": bool(slot["afk"]), "hasWebSignal": bool(slot["web"]),
+            "hasInputSignal": bool(slot["input"]),
+        })
         # RBAC: a manager only sees people assigned to the teams they manage
         if is_manager and meta.get("teamId") not in managed:
             continue
@@ -1117,6 +1211,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
             "scheduleAdherence": round(min(100.0, scheduled_active / expected * 100) if expected else 0.0, 1), "productivityIndex": round(min(100.0, scheduled_productive / expected * 100) if expected else 0.0, 1), "outsideScheduleSeconds": round(max(0.0, tracked - min(tracked, expected)) if expected else 0.0, 3), "scheduleName": schedule.get("name") if schedule else None,
             "presses": presses, "clicks": clicks,
             "inputSeconds": round(input_seconds, 3), "webSeconds": round(web_seconds, 3), "appSeconds": round(sum(app_seconds.values()), 3),
+            "productivityScore": score_detail,
             "topApps": [{"name": app, "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": classify(app, rules)} for app, seconds in top_apps],
             "topUrls": [{"url": url, "domain": urllib.parse.urlsplit(url).hostname or url, "title": page_titles.get(url, ""), "seconds": round(seconds, 3), "duration": duration_label(seconds), "classification": classify(urllib.parse.urlsplit(url).hostname or url, rules)} for url, seconds in top_urls],
             "recentActivity": recent_activity[:40],
@@ -1136,6 +1231,7 @@ def people_directory(params: dict, current_viewer: dict) -> dict:
             "trackedSeconds": 0, "activeSeconds": 0, "idleSeconds": 0, "productiveSeconds": 0, "focusScore": 0,
             "expectedSeconds": round(intervals_duration(schedule_windows(next((s for s in config.get("schedules", []) if s.get("id") == person.get("scheduleId") and s.get("tenantId") == tenant_id), None), start, end)), 3), "scheduledActiveSeconds": 0, "scheduledProductiveSeconds": 0, "scheduleAdherence": 0, "productivityIndex": 0, "outsideScheduleSeconds": 0, "scheduleName": next((s.get("name") for s in config.get("schedules", []) if s.get("id") == person.get("scheduleId")), None),
             "presses": 0, "clicks": 0, "inputSeconds": 0, "webSeconds": 0, "appSeconds": 0, "topApps": [], "topUrls": [], "recentActivity": [],
+            "productivityScore": productivity_score({"expectedSeconds": intervals_duration(schedule_windows(next((s for s in config.get("schedules", []) if s.get("id") == person.get("scheduleId") and s.get("tenantId") == tenant_id), None), start, end))}),
         })
     if scope == "self" or current_viewer["role"] in ("member", "employee"):
         me = (current_viewer.get("email") or "").lower()
@@ -1159,20 +1255,22 @@ def analytics_dashboard(params: dict, current_viewer: dict) -> dict:
     groups: dict[str, dict] = {}
     for person in directory["people"]:
         team_id = person.get("teamId") or "unassigned"
-        row = groups.setdefault(team_id, {"id": team_id, "name": team_names.get(team_id, "Sem OU"), "people": 0, "trackedSeconds": 0.0, "activeSeconds": 0.0, "productiveSeconds": 0.0, "webSeconds": 0.0, "inputSeconds": 0.0, "presses": 0, "clicks": 0})
+        row = groups.setdefault(team_id, {"id": team_id, "name": team_names.get(team_id, "Sem OU"), "people": 0, "trackedSeconds": 0.0, "activeSeconds": 0.0, "productiveSeconds": 0.0, "webSeconds": 0.0, "inputSeconds": 0.0, "presses": 0, "clicks": 0, "members": []})
         row["people"] += 1
+        row["members"].append(person)
         for key in ("trackedSeconds", "activeSeconds", "productiveSeconds", "webSeconds", "inputSeconds", "presses", "clicks"):
             row[key] += float(person.get(key, 0) or 0)
     teams = []
     for row in groups.values():
         row["focusScore"] = round(row["productiveSeconds"] / row["trackedSeconds"] * 100 if row["trackedSeconds"] else 0.0, 1)
+        row["productivityScore"] = aggregate_productivity_scores(row.pop("members"))
         for key in ("trackedSeconds", "activeSeconds", "productiveSeconds", "webSeconds", "inputSeconds"):
             row[key] = round(row[key], 3)
         row["presses"] = int(row["presses"]); row["clicks"] = int(row["clicks"])
         teams.append(row)
     teams.sort(key=lambda row: (-row["focusScore"], -row["productiveSeconds"], row["name"].lower()))
-    people = sorted(directory["people"], key=lambda person: (-person.get("productiveSeconds", 0), person["name"].lower()))
-    return {"tenant": directory["tenant"], "period": directory["period"], "range": directory["range"], "generatedAt": directory["generatedAt"], "people": people, "teams": teams}
+    people = sorted(directory["people"], key=lambda person: (-float((person.get("productivityScore") or {}).get("score", 0)), person["name"].lower()))
+    return {"tenant": directory["tenant"], "period": directory["period"], "range": directory["range"], "generatedAt": directory["generatedAt"], "scoreMethodology": {"version": PRODUCTIVITY_SCORE_VERSION, "weights": PRODUCTIVITY_SCORE_WEIGHTS}, "organization": aggregate_productivity_scores(directory["people"]), "people": people, "teams": teams}
 
 
 def tenant_admin_emails(config: dict, tenant_id: str) -> list:
@@ -1853,6 +1951,21 @@ exit /b 0
             config = load_config(); is_super = current["role"] == "super_admin"
             tenant_id = params.get("tenant", [current["tenantId"]])[0] if is_super else current["tenantId"]
             return self.send_json(200, {**billing_summary(config, tenant_id), "pricingEditable": is_super, "poolEditable": is_super, "tenant": next((t for t in config["tenants"] if t["id"] == tenant_id), {"id": tenant_id, "name": tenant_id})})
+        if parsed.path in ("/dashboard/score-report.csv", "/dashboard/score-report.json"):
+            try: report = analytics_dashboard(params, current)
+            except Exception as error: return self.send_json(502, {"error": "score_report_unavailable", "detail": str(error)[:240]})
+            if parsed.path.endswith(".json"):
+                return self.send_json(200, report)
+            output = io.StringIO(); writer = csv.writer(output)
+            writer.writerow(["nivel", "id", "nome", "score_produtividade", "cobertura_percentual", "confianca", "base_suficiente", "pessoas", "pessoas_sem_base"])
+            organization = report["organization"]
+            writer.writerow(["organizacao", report["tenant"]["id"], report["tenant"]["name"], organization["score"], organization["coverage"], organization["confidence"], organization["sufficientData"], organization["people"], organization["peopleInsufficient"]])
+            for team in report["teams"]:
+                score = team["productivityScore"]; writer.writerow(["ou", team["id"], team["name"], score["score"], score["coverage"], score["confidence"], score["sufficientData"], score["people"], score["peopleInsufficient"]])
+            for person in report["people"]:
+                score = person["productivityScore"]; writer.writerow(["colaborador", person["id"], person["name"], score["score"], score["coverage"], score["confidence"], score["sufficientData"], 1, 0 if score["sufficientData"] else 1])
+            body = ("\ufeff" + output.getvalue()).encode("utf-8")
+            self.send_response(200); self.send_header("Content-Type", "text/csv; charset=utf-8"); self.send_header("Content-Disposition", f'attachment; filename="timewatcher-score-{report["tenant"]["id"]}-{report["period"]}.csv"'); self.send_header("Content-Length", str(len(body))); self.end_headers(); return self.wfile.write(body)
         if parsed.path in ("/dashboard/export.csv", "/dashboard/export.json"):
             try: data = dashboard_data(params, current)
             except Exception as error: return self.send_json(502, {"error": "export_unavailable", "detail": str(error)[:240]})

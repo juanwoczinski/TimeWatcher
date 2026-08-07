@@ -145,6 +145,7 @@ type Person = {
   scheduleAdherence?: number;
   productivityIndex?: number;
   outsideScheduleSeconds?: number;
+  productivityScore?: ProductivityScore;
   inputSeconds?: number;
   webSeconds?: number;
   appSeconds?: number;
@@ -155,6 +156,19 @@ type Person = {
   scheduledProductiveSeconds?: number;
   outsideScheduleSeconds?: number;
   scheduleName?: string | null;
+};
+type ProductivityScore = {
+  version: string;
+  score: number;
+  rawScore?: number;
+  coverage: number;
+  confidence: "low" | "medium" | "high";
+  sufficientData: boolean;
+  people?: number;
+  peopleWithData?: number;
+  peopleInsufficient?: number;
+  missingSignals?: string[];
+  components?: Record<string, { label: string; weight: number; score: number | null; available: boolean }>;
 };
 type Data = {
   viewer: { username: string; name: string; role: Role; tenantId: string; onboardingCompletedAt?: string | null };
@@ -1150,22 +1164,31 @@ function MicroInsights({ d }: { d: Data }) {
     <article className="card domains-card"><div className="card-head"><div><h2>Domínios que mais consomem tempo</h2><p>Distribuição do uso de URLs.</p></div></div><div className="domain-list">{domainRows.length ? domainRows.map((x) => <div key={x.domain}><span><b>{x.domain}</b><small>{x.classification === "productive" ? "Produtivo" : x.classification === "unproductive" ? "Não produtivo" : "Neutro"}</small></span><em><i style={{width:`${Math.min(100, x.seconds / Math.max(domainRows[0].seconds, 1) * 100)}%`}}/></em><strong>{x.duration}</strong></div>) : <State text="Ainda não há URLs no período." />}</div></article>
   </section>;
 }
-type AnalyticsPerson = DirPerson & { webSeconds: number; inputSeconds: number; appSeconds: number };
-type AnalyticsTeam = { id: string; name: string; people: number; trackedSeconds: number; activeSeconds: number; productiveSeconds: number; webSeconds: number; inputSeconds: number; presses: number; clicks: number; focusScore: number };
+type AnalyticsPerson = DirPerson & { webSeconds: number; inputSeconds: number; appSeconds: number; productivityScore: ProductivityScore };
+type AnalyticsTeam = { id: string; name: string; people: number; trackedSeconds: number; activeSeconds: number; productiveSeconds: number; webSeconds: number; inputSeconds: number; presses: number; clicks: number; focusScore: number; productivityScore: ProductivityScore };
+type AnalyticsReport = { people: AnalyticsPerson[]; teams: AnalyticsTeam[]; organization: ProductivityScore; scoreMethodology: { version: string; weights: Record<string, number> } };
+function scoreConfidence(value: ProductivityScore) {
+  return value.confidence === "high" ? "Alta confiança" : value.confidence === "medium" ? "Confiança média" : "Baixa confiança";
+}
 function ProductivityAnalytics({ d }: { d: Data }) {
-  const [report, setReport] = useState<{ people: AnalyticsPerson[]; teams: AnalyticsTeam[] } | null>(null);
+  const [report, setReport] = useState<AnalyticsReport | null>(null);
   const selfOnly = d.viewer.role === "member" || d.viewer.role === "employee";
   const managerView = d.viewer.role === "manager";
   useEffect(() => {
-    const q = new URLSearchParams({ period: d.period, scope: d.scope || "default" });
+    const q = new URLSearchParams({ period: d.period, scope: d.scope || "default", tenant: d.tenant.id });
     fetch(`/platform-api/dashboard/analytics?${q}`, { credentials: "same-origin", cache: "no-store" })
       .then((r) => r.ok ? r.json() : null).then(setReport).catch(() => {});
   }, [d.period, d.generatedAt]);
   if (!report) return <State text="Calculando produtividade por pessoa e equipe…" />;
-  return <div className="analytics-grid">
-    <article className="card analytics-card"><div className="card-head"><div><h2>{selfOnly ? "Meu detalhamento de produtividade" : managerView ? "Produtividade do meu time" : "Produtividade por colaborador"}</h2><p>Tempo produtivo, entradas de teclado/mouse e uso web.</p></div></div><div className="analytics-list">{report.people.slice(0, selfOnly ? 1 : 6).map((p) => <div className="analytics-row" key={p.id}><span><b>{p.name}</b><small>{p.device}</small></span><span title="Interação de teclado e mouse">⌨ {duration(p.inputSeconds || 0)} · {p.presses.toLocaleString("pt-BR")} teclas</span><span title="Tempo em URLs">◉ {duration(p.webSeconds || 0)}</span><strong>{p.focusScore}%</strong></div>)}</div></article>
-    <article className="card analytics-card"><div className="card-head"><div><h2>{selfOnly ? "Meu ritmo de trabalho" : "Comparativo entre equipes"}</h2><p>{selfOnly ? "Interações e uso de aplicações no período selecionado." : "Índice de produtividade com base no tempo real."}</p></div></div><div className="analytics-list">{selfOnly ? <><div className="analytics-row"><span><b>Aplicações</b><small>tempo de janelas ativas</small></span><span>⌨ {duration(d.summary.inputSeconds)}</span><span>◉ {duration(d.summary.webSeconds)}</span><strong>{duration(d.summary.activeSeconds)}</strong></div><div className="analytics-row"><span><b>Jornada</b><small>tempo observado dentro da jornada</small></span><span>Meta {duration(d.summary.expectedSeconds || 0)}</span><span>Ativo {duration(d.summary.scheduledActiveSeconds || 0)}</span><strong>{Math.round(d.summary.scheduleAdherence || 0)}%</strong></div></> : report.teams.length ? report.teams.slice(0, 6).map((t) => <div className="analytics-row team" key={t.id}><span><b>{t.name}</b><small>{t.people} pessoa(s) · {duration(t.activeSeconds)} ativo</small></span><span>⌨ {duration(t.inputSeconds)}</span><span>◉ {duration(t.webSeconds)}</span><strong>{t.focusScore}%</strong></div>) : <State text="Atribua pessoas a uma OU para comparar equipes." />}</div></article>
-  </div>;
+  const headline = selfOnly ? "Meu score" : managerView ? "Score do meu time" : "Score da organização";
+  return <section className="productivity-score-section">
+    <article className="card score-overview"><div><span>SCORE DE PRODUTIVIDADE · V{report.scoreMethodology.version}</span><h2>{headline}</h2><p>Composição auditável de aplicações, URLs, jornada, utilização e interação. Ausência de coleta reduz a cobertura e a nota.</p></div><div className="score-gauge"><strong>{report.organization.score.toFixed(1)}</strong><small>/ 100</small></div><div className="score-coverage"><b>{report.organization.coverage.toFixed(0)}% de cobertura</b><span>{scoreConfidence(report.organization)} · {report.organization.peopleInsufficient || 0} pessoa(s) com base insuficiente</span></div></article>
+    <div className="analytics-grid">
+      <article className="card analytics-card"><div className="card-head"><div><h2>{selfOnly ? "Composição do meu score" : managerView ? "Score por colaborador do time" : "Score por colaborador"}</h2><p>Nota, cobertura dos coletores e confiança da leitura.</p></div></div><div className="analytics-list">{report.people.slice(0, selfOnly ? 1 : 8).map((p) => <div className="analytics-row score-row" key={p.id}><span><b>{p.name}</b><small>{p.device} · foco classificado {p.focusScore}%</small></span><span>{p.productivityScore.coverage.toFixed(0)}% cobertura</span><span>{scoreConfidence(p.productivityScore)}</span><strong className={p.productivityScore.sufficientData ? "" : "provisional"}>{p.productivityScore.score.toFixed(1)}</strong></div>)}</div></article>
+      <article className="card analytics-card"><div className="card-head"><div><h2>{selfOnly ? "Componentes analisados" : "Score por OU"}</h2><p>{selfOnly ? "Pesos e notas que explicam o resultado." : "Média ponderada pela jornada esperada de cada pessoa."}</p></div></div>{selfOnly && report.people[0]?.productivityScore.components ? <div className="score-components">{Object.entries(report.people[0].productivityScore.components).map(([key, item]) => <div key={key}><span><b>{item.label}</b><small>Peso {item.weight}%</small></span><em><i style={{width: `${item.score || 0}%`}} /></em><strong>{item.available ? item.score?.toFixed(0) : "N/D"}</strong></div>)}</div> : <div className="analytics-list">{report.teams.length ? report.teams.slice(0, 8).map((t) => <div className="analytics-row team score-row" key={t.id}><span><b>{t.name}</b><small>{t.people} pessoa(s) · {duration(t.activeSeconds)} ativo</small></span><span>{t.productivityScore.coverage.toFixed(0)}% cobertura</span><span>{t.productivityScore.peopleInsufficient || 0} sem base</span><strong>{t.productivityScore.score.toFixed(1)}</strong></div>) : <State text="Atribua pessoas a uma OU para comparar equipes." />}</div>}</article>
+    </div>
+    <details className="score-methodology"><summary>Como o score é calculado?</summary><div><p><b>Aplicações 30%</b> e <b>URLs 20%</b>: produtivo vale 100, neutro 50 e não produtivo 0. <b>Jornada 25%</b>: tempo ativo dentro do horário esperado. <b>Utilização 15%</b>: ativo sobre monitorado. <b>Interação 10%</b>: consistência de teclado e cliques, com saturação para não premiar volume artificial.</p><p>A nota disponível recebe um ajuste limitado pela cobertura dos coletores. Menos de 15 minutos monitorados ou cobertura inferior a 45% produz leitura provisória.</p></div></details>
+  </section>;
 }
 function TeamCollectionVisibility({ d, go }: { d: Data; go: (section: Section) => void }) {
   const [people, setPeople] = useState<DirPerson[]>([]);
@@ -1215,9 +1238,9 @@ function Overview({ d, go, reload }: { d: Data; go: (s: Section) => void; reload
           note={`${duration(s.idleSeconds)} ocioso`}
         />
         <Metric
-          label="Produtividade"
+          label="Foco classificado"
           value={`${s.focusScore}%`}
-          note={`${duration(s.productiveSeconds)} produtivo`}
+          note={`${duration(s.productiveSeconds)} em itens produtivos`}
         />
         <Metric
           label="Sites identificados"
@@ -1443,6 +1466,13 @@ type DirPerson = {
   idleSeconds: number;
   productiveSeconds: number;
   focusScore: number;
+  productivityScore: ProductivityScore;
+  expectedSeconds?: number;
+  scheduledActiveSeconds?: number;
+  scheduleAdherence?: number;
+  productivityIndex?: number;
+  inputSeconds?: number;
+  webSeconds?: number;
   presses: number;
   clicks: number;
   topApps: {
@@ -1679,7 +1709,7 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
                   <th>Dispositivo</th>
                   <th>Status</th>
                   <th className="num">Monitorado</th>
-                  <th className="num">Foco</th>
+                  <th className="num">Score</th>
                   <th>Visto</th>
                 </tr>
               </thead>
@@ -1710,7 +1740,7 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
                       </span>
                     </td>
                     <td className="num">{duration(person.trackedSeconds)}</td>
-                    <td className="num">{person.focusScore}%</td>
+                    <td className="num"><strong>{person.productivityScore.score.toFixed(1)}</strong><small className="table-sub">{person.productivityScore.coverage.toFixed(0)}% cobertura</small></td>
                     <td>{date(person.lastSeen)}</td>
                   </tr>
                 ))}
@@ -1778,6 +1808,7 @@ function People({ d, reload }: { d: Data; reload: () => void }) {
                 {current.observedIp ? ` · IP: ${current.observedIp}` : ""}
               </p>
             </div>
+            <div className="person-score-summary"><span>SCORE V{current.productivityScore.version}</span><strong>{current.productivityScore.score.toFixed(1)}</strong><small>{current.productivityScore.coverage.toFixed(0)}% cobertura · {scoreConfidence(current.productivityScore)}</small>{!current.productivityScore.sufficientData && <em>Leitura provisória</em>}</div>
             <dl>
               <div>
                 <dt>Monitorado</dt>
@@ -3223,6 +3254,7 @@ function Reports({
     q.set("end", end);
   }
   const defaultReports = [
+    { id: "score", title: "Score de produtividade", detail: "Nota explicada por pessoa, OU e organização, com cobertura dos dados.", value: "0–100" },
     { id: "executive", title: "Resumo executivo", detail: "Produtividade, jornada e utilização no período.", value: `${d.summary.focusScore}%` },
     { id: "productivity", title: "Produtividade por período", detail: "Tempo produtivo, neutro e não produtivo.", value: duration(d.summary.productiveSeconds) },
     { id: "journey", title: "Aderência à jornada", detail: "Tempo previsto, ativo, atrasos e banco de horas.", value: `${Math.round(d.summary.scheduleAdherence || 0)}%` },
@@ -3252,7 +3284,7 @@ function Reports({
           <a href={`/platform-api/dashboard/export.json?${q}`}>Exportar JSON</a>
         </div>
       </div>
-      <section className="default-reports"><div className="default-reports-head"><div><span>RELATÓRIOS PADRÃO</span><h2>Escolha uma análise para o período selecionado</h2><p>Os 10 relatórios abaixo são calculados com os dados reais do filtro atual.</p></div><button className="text-button" onClick={() => setPreviewOpen(true)}>Abrir {chosen.title} →</button></div><div className="report-template-grid">{defaultReports.map((item) => <button key={item.id} className={selectedReport === item.id ? "selected" : ""} onClick={() => { setSelectedReport(item.id); setPreviewOpen(true); }}><span>{item.title}</span><b>{item.value}</b><small>{item.detail}</small></button>)}</div></section>
+      <section className="default-reports"><div className="default-reports-head"><div><span>RELATÓRIOS PADRÃO</span><h2>Escolha uma análise para o período selecionado</h2><p>Os {defaultReports.length} relatórios abaixo são calculados com os dados reais do filtro atual.</p></div><button className="text-button" onClick={() => setPreviewOpen(true)}>Abrir {chosen.title} →</button></div><div className="report-template-grid">{defaultReports.map((item) => <button key={item.id} className={selectedReport === item.id ? "selected" : ""} onClick={() => { setSelectedReport(item.id); setPreviewOpen(true); }}><span>{item.title}</span><b>{item.value}</b><small>{item.detail}</small></button>)}</div></section>
       <div className="metrics dense-metrics">
         <Metric
           label="Monitorado"
@@ -3282,6 +3314,7 @@ function Reports({
         <article className="card report-insight"><span>MAIOR CONSUMO WEB</span><h2>{topDomain?.domain || "Sem URLs"}</h2><p>{topDomain ? `${topDomain.duration} · ${topDomain.classification === "productive" ? "produtivo" : topDomain.classification === "unproductive" ? "não produtivo" : "neutro"}.` : "Aguardando telemetria do navegador."}</p></article>
         <article className="card report-insight"><span>QUALIDADE DA JORNADA</span><h2>{duration(d.summary.idleSeconds)} ocioso</h2><p>{d.schedule ? `${d.schedule.name}: ${d.schedule.start}–${d.schedule.end}.` : "Sem jornada atribuída ao escopo."}</p></article>
       </div>
+      <ProductivityScoreReport d={d} />
       {(d.viewer.role === "super_admin" || d.viewer.role === "org_admin") && <div className="report-admin-grid"><ReportScheduling d={d} /><MonthlyClosing d={d} reload={reload} /></div>}
       <div className="grid-bottom report-breakdown">
         <article className="card">
@@ -3301,11 +3334,23 @@ function Reports({
     </div>
   );
 }
-function ReportPreview({ d, personal, manager, report, onClose }: { d: Data; personal: boolean; manager: boolean; report: { title: string; detail: string }; onClose: () => void }) {
+function ProductivityScoreReport({ d }: { d: Data }) {
+  const [report, setReport] = useState<AnalyticsReport | null>(null);
+  useEffect(() => {
+    const q = new URLSearchParams({ period: d.period, scope: d.scope || "default", tenant: d.tenant.id });
+    fetch(`/platform-api/dashboard/analytics?${q}`, { credentials: "same-origin", cache: "no-store" }).then(r => r.ok ? r.json() : null).then(setReport).catch(() => setReport(null));
+  }, [d.period, d.scope, d.tenant.id, d.generatedAt]);
+  if (!report) return <State text="Calculando relatório de score…" />;
+  const exportQuery = new URLSearchParams({ period: d.period, scope: d.scope || "default", tenant: d.tenant.id });
+  if (d.period === "custom") { exportQuery.set("start", d.range.start.slice(0, 10)); exportQuery.set("end", new Date(new Date(d.range.end).getTime() - 86400000).toISOString().slice(0, 10)); }
+  return <section className="card score-report"><div className="score-report-head"><div><span>RELATÓRIO DE SCORE · V{report.scoreMethodology.version}</span><h2>Produtividade explicada por organização, OU e colaborador</h2><p>Média ponderada pela jornada esperada. Pessoas sem base suficiente aparecem na cobertura e influenciam o consolidado quando possuem jornada.</p></div><div className="score-report-total"><strong>{report.organization.score.toFixed(1)}</strong><span>{report.organization.coverage.toFixed(0)}% cobertura</span><div><a href={`/platform-api/dashboard/score-report.csv?${exportQuery}`}>CSV</a><a href={`/platform-api/dashboard/score-report.json?${exportQuery}`}>JSON</a></div></div></div><div className="score-report-columns"><div><h3>Unidades organizacionais</h3>{report.teams.map(team => <div className="score-report-row" key={team.id}><span><b>{team.name}</b><small>{team.people} pessoa(s) · {team.productivityScore.peopleInsufficient || 0} sem base</small></span><em><i style={{width:`${team.productivityScore.score}%`}} /></em><strong>{team.productivityScore.score.toFixed(1)}</strong></div>)}</div><div><h3>Colaboradores</h3>{report.people.slice(0, 12).map(person => <div className="score-report-row" key={person.id}><span><b>{person.name}</b><small>{person.productivityScore.coverage.toFixed(0)}% cobertura · {scoreConfidence(person.productivityScore)}</small></span><em><i style={{width:`${person.productivityScore.score}%`}} /></em><strong>{person.productivityScore.score.toFixed(1)}</strong></div>)}</div></div></section>;
+}
+function ReportPreview({ d, personal, manager, report, onClose }: { d: Data; personal: boolean; manager: boolean; report: { id: string; title: string; detail: string }; onClose: () => void }) {
   const reportTitle = report.title === "Resumo executivo" ? (personal ? "Relatório pessoal de produtividade" : manager ? "Relatório do time" : "Relatório executivo") : report.title;
   const [contributors, setContributors] = useState<DirPerson[]>([]);
-  useEffect(() => { const q = new URLSearchParams({ period: d.period, scope: d.scope || "default" }); fetch(`/platform-api/dashboard/people?${q}`, {credentials:"same-origin", cache:"no-store"}).then(r => r.ok ? r.json() : null).then(x => setContributors(x?.people || [])).catch(() => setContributors([])); }, [d.period, d.scope, d.generatedAt]);
-  return <div className="report-preview-backdrop" role="dialog" aria-modal="true" aria-label="Prévia do relatório"><section className="report-preview"><header><div><span>TIMEWATCHER · RELATÓRIO RENDERIZADO</span><h2>{reportTitle}</h2><p>{report.detail} · {d.tenant.name} · {new Date(d.range.start).toLocaleDateString("pt-BR")} — {new Date(d.range.end).toLocaleDateString("pt-BR")}</p></div><div><button onClick={() => window.print()}>Imprimir / PDF</button><button className="close-preview" onClick={onClose}>Fechar</button></div></header><div className="preview-kpis"><div><span>Monitorado</span><b>{duration(d.summary.trackedSeconds)}</b></div><div><span>Ativo</span><b>{duration(d.summary.activeSeconds)}</b></div><div><span>Produtivo</span><b>{duration(d.summary.productiveSeconds)}</b></div><div><span>Produtividade</span><b>{d.summary.focusScore}%</b></div><div><span>Jornada</span><b>{Math.round(d.summary.scheduleAdherence || 0)}%</b></div></div><div className="preview-columns"><article><h3>Aplicações principais</h3>{d.apps.length ? d.apps.slice(0, 8).map(x => <div className="preview-row" key={x.name}><span>{x.name}<small>{x.classification === "productive" ? "Produtivo" : x.classification === "unproductive" ? "Não produtivo" : "Neutro"}</small></span><b>{x.duration}</b></div>) : <p>Sem aplicações no período.</p>}</article><article><h3>Sites e URLs principais</h3>{d.urls.length ? d.urls.slice(0, 8).map(x => <div className="preview-row" key={x.url}><span>{x.domain}<small>{x.title || x.classification}</small></span><b>{x.duration}</b></div>) : <p>Sem URLs no período.</p>}</article></div>{contributors.length > 0 && <article className="preview-contributors"><h3>Colaboradores que geraram atividades</h3>{contributors.slice(0, 15).map(person => <div className="preview-row" key={person.id}><span><b>{person.name}</b><small>{person.device} · sessão {person.sessionUser || "não identificada"} · {person.topUrls?.[0]?.domain || person.topApps?.[0]?.name || "sem atividade"}</small></span><b>{duration(person.activeSeconds)} ativo</b></div>)}</article>}<footer>Dados gerados em {date(d.generatedAt)} · fonte: agentes vinculados e telemetria autorizada.</footer></section></div>;
+  const [analytics, setAnalytics] = useState<AnalyticsReport | null>(null);
+  useEffect(() => { const q = new URLSearchParams({ period: d.period, scope: d.scope || "default", tenant: d.tenant.id }); Promise.all([fetch(`/platform-api/dashboard/people?${q}`, {credentials:"same-origin", cache:"no-store"}), fetch(`/platform-api/dashboard/analytics?${q}`, {credentials:"same-origin", cache:"no-store"})]).then(async ([peopleResponse, analyticsResponse]) => { setContributors(peopleResponse.ok ? (await peopleResponse.json()).people || [] : []); setAnalytics(analyticsResponse.ok ? await analyticsResponse.json() : null); }).catch(() => { setContributors([]); setAnalytics(null); }); }, [d.period, d.scope, d.tenant.id, d.generatedAt]);
+  return <div className="report-preview-backdrop" role="dialog" aria-modal="true" aria-label="Prévia do relatório"><section className="report-preview"><header><div><span>TIMEWATCHER · RELATÓRIO RENDERIZADO</span><h2>{reportTitle}</h2><p>{report.detail} · {d.tenant.name} · {new Date(d.range.start).toLocaleDateString("pt-BR")} — {new Date(d.range.end).toLocaleDateString("pt-BR")}</p></div><div><button onClick={() => window.print()}>Imprimir / PDF</button><button className="close-preview" onClick={onClose}>Fechar</button></div></header><div className="preview-kpis"><div><span>Monitorado</span><b>{duration(d.summary.trackedSeconds)}</b></div><div><span>Ativo</span><b>{duration(d.summary.activeSeconds)}</b></div><div><span>Produtivo</span><b>{duration(d.summary.productiveSeconds)}</b></div><div><span>Foco classificado</span><b>{d.summary.focusScore}%</b></div><div><span>Jornada</span><b>{Math.round(d.summary.scheduleAdherence || 0)}%</b></div></div>{analytics && <article className="preview-score"><div><span>SCORE V{analytics.scoreMethodology.version}</span><strong>{analytics.organization.score.toFixed(1)}</strong><small>{analytics.organization.coverage.toFixed(0)}% de cobertura · {scoreConfidence(analytics.organization)}</small></div><div>{analytics.teams.slice(0, 6).map(team => <p key={team.id}><span>{team.name}</span><b>{team.productivityScore.score.toFixed(1)}</b></p>)}</div></article>}<div className="preview-columns"><article><h3>Aplicações principais</h3>{d.apps.length ? d.apps.slice(0, 8).map(x => <div className="preview-row" key={x.name}><span>{x.name}<small>{x.classification === "productive" ? "Produtivo" : x.classification === "unproductive" ? "Não produtivo" : "Neutro"}</small></span><b>{x.duration}</b></div>) : <p>Sem aplicações no período.</p>}</article><article><h3>Sites e URLs principais</h3>{d.urls.length ? d.urls.slice(0, 8).map(x => <div className="preview-row" key={x.url}><span>{x.domain}<small>{x.title || x.classification}</small></span><b>{x.duration}</b></div>) : <p>Sem URLs no período.</p>}</article></div>{contributors.length > 0 && <article className="preview-contributors"><h3>Score por colaborador</h3>{contributors.slice(0, 15).map(person => <div className="preview-row" key={person.id}><span><b>{person.name}</b><small>{person.device} · {person.productivityScore.coverage.toFixed(0)}% cobertura · {person.topUrls?.[0]?.domain || person.topApps?.[0]?.name || "sem atividade"}</small></span><b>{person.productivityScore.score.toFixed(1)}</b></div>)}</article>}<footer>Score v{analytics?.scoreMethodology.version || "1.0"} · dados gerados em {date(d.generatedAt)} · fonte: agentes vinculados e telemetria autorizada.</footer></section></div>;
 }
 function ReportScheduling({ d }: { d: Data }) {
   const [items, setItems] = useState<{id: string; email: string; frequency: string; deliveryStatus?: string; lastSentAt?: string}[]>([]);
