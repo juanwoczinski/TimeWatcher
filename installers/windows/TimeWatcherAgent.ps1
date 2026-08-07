@@ -41,7 +41,7 @@ function Get-IdleSeconds {
 }
 
 $settings = Get-ItemProperty "HKLM:\Software\TimeWatcher" -ErrorAction SilentlyContinue
-if (-not $settings.ServerUrl -or -not $settings.EnrollmentToken -or -not $settings.TenantId) {
+if (-not $settings.ServerUrl -or -not $settings.TenantId -or (-not $settings.EnrollmentToken -and -not $settings.AgentToken)) {
   Write-AgentLog "ERRO configuracao ausente: reinstale usando o pacote vinculado ao tenant."
   exit 2
 }
@@ -50,9 +50,26 @@ try {
   $mutex = New-Object System.Threading.Mutex($false, "Global\\TimeWatcherAgent")
   if (-not $mutex.WaitOne(0, $false)) { Write-AgentLog "Instancia ja em execucao."; exit 0 }
 } catch {}
-$headers = @{ Authorization = "Bearer $($settings.EnrollmentToken)" }
 $device = $env:COMPUTERNAME
-$AgentVersion = "0.4.1"
+$AgentVersion = "0.4.2"
+$agentToken = [string]$settings.AgentToken
+if (-not $agentToken) {
+  try {
+    Write-AgentLog "Registrando credencial permanente do dispositivo..."
+    $enrollmentHeaders = @{ Authorization = "Bearer $($settings.EnrollmentToken)" }
+    $enrollmentBody = @{ host = $device; platform = "windows" } | ConvertTo-Json
+    $enrollment = Invoke-RestMethod -Method Post -Uri "$($settings.ServerUrl)/ingest/v1/agent-enroll" -Headers $enrollmentHeaders -ContentType "application/json" -Body $enrollmentBody
+    $agentToken = [string]$enrollment.agentToken
+    if (-not $agentToken) { throw "Servidor nao retornou a credencial do agente" }
+    New-Item -Path "HKLM:\Software\TimeWatcher" -Force | Out-Null
+    New-ItemProperty -Path "HKLM:\Software\TimeWatcher" -Name "AgentToken" -Value $agentToken -PropertyType String -Force | Out-Null
+    Write-AgentLog "Credencial permanente registrada."
+  } catch {
+    Write-AgentLog "ERRO no provisionamento: $($_.Exception.Message)"
+    exit 3
+  }
+}
+$headers = @{ Authorization = "Bearer $agentToken" }
 $UpdateStatePath = Join-Path $env:ProgramData "TimeWatcher\update-state.json"
 $LastUpdateCheck = [DateTime]::MinValue
 

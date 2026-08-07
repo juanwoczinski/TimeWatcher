@@ -4,6 +4,8 @@ import io
 import tempfile
 import unittest
 import zipfile
+import hashlib
+from datetime import datetime, timezone, timedelta
 
 os.environ.setdefault("WATCHSYNOVA_INGEST_TOKEN", "test-token")
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -81,9 +83,48 @@ class AgentUpdateTests(unittest.TestCase):
                 with zipfile.ZipFile(io.BytesIO(handler.wfile.getvalue())) as package:
                     self.assertEqual(set(package.namelist()), {"TimeWatcher-Windows.msi", "Instalar-TimeWatcher.cmd", "LEIA-ME.txt"})
                     self.assertIn('TENANT_ID="synova"', package.read("Instalar-TimeWatcher.cmd").decode())
+                    self.assertIn("net session", package.read("Instalar-TimeWatcher.cmd").decode())
         finally:
             server.load_config = original
             server.WINDOWS_MSI_FILE = original_msi
+
+    def test_single_file_windows_launcher_downloads_and_verifies_msi(self):
+        token = "single-file-token"
+        config = server.default_config()
+        config["enrollments"] = [{"tenantId": "synova", "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "expiresAt": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()}]
+        original = server.load_config; original_msi = server.WINDOWS_MSI_FILE
+        try:
+            server.load_config = lambda: config
+            with tempfile.TemporaryDirectory() as directory:
+                msi = os.path.join(directory, "TimeWatcher-Windows.msi")
+                with open(msi, "wb") as artifact: artifact.write(b"test-msi")
+                server.WINDOWS_MSI_FILE = server.Path(msi)
+                handler = object.__new__(server.Handler); handler.wfile = io.BytesIO(); headers = {}
+                handler.send_response = lambda status: setattr(handler, "status", status)
+                handler.send_header = lambda key, value: headers.__setitem__(key, value)
+                handler.end_headers = lambda: None
+                handler.serve_windows_enrollment_package(token, True)
+                launcher = handler.wfile.getvalue().decode()
+                self.assertEqual(handler.status, 200)
+                self.assertIn('filename="Instalar-TimeWatcher-Windows.cmd"', headers["Content-Disposition"])
+                self.assertIn("Invoke-WebRequest", launcher)
+                self.assertIn(hashlib.sha256(b"test-msi").hexdigest(), launcher)
+                self.assertIn('ENROLLMENT_TOKEN="single-file-token"', launcher)
+        finally:
+            server.load_config = original; server.WINDOWS_MSI_FILE = original_msi
+
+    def test_durable_agent_token_survives_expired_enrollment(self):
+        durable = "durable-device-token"
+        config = server.default_config()
+        config["enrollments"] = []
+        config["agentTokens"] = [{"tenantId": "synova", "host": "pc-01", "tokenHash": hashlib.sha256(durable.encode()).hexdigest(), "enabled": True}]
+        original = server.load_config
+        try:
+            server.load_config = lambda: config
+            self.assertEqual(server.ingest_tenant(durable), "synova")
+            self.assertIsNone(server.ingest_tenant("invalid"))
+        finally:
+            server.load_config = original
 
 
 if __name__ == "__main__":

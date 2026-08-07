@@ -62,6 +62,7 @@ def default_config() -> dict:
         "schedules": [{"id": "standard", "tenantId": "synova", "name": "Jornada padrão", "start": "09:00", "end": "18:00", "breakMinutes": 60, "weekdays": [1, 2, 3, 4, 5]}],
         "people": [{"id": "juan-kleber", "tenantId": "synova", "name": OWNER_NAME, "role": "Administrador", "scheduleId": "standard", "deviceIds": []}],
         "enrollments": [],
+        "agentTokens": [],
         "accounts": {},
         "invites": [],
         "teams": [],
@@ -657,18 +658,29 @@ def retention_worker() -> None:
         time.sleep(86400)
 
 
-def ingest_tenant(supplied_token: str) -> str | None:
-    if hmac.compare_digest(supplied_token, TOKEN):
-        return "synova"
+def enrollment_tenant(supplied_token: str, config: dict | None = None) -> str | None:
+    """Resolve a short-lived installer token; never accepts an agent token."""
     digest = hashlib.sha256(supplied_token.encode()).hexdigest()
     now = datetime.now(timezone.utc)
-    for enrollment in load_config()["enrollments"]:
+    for enrollment in (config or load_config()).get("enrollments", []):
         try:
             if hmac.compare_digest(digest, enrollment["tokenHash"]) and parse_timestamp(enrollment["expiresAt"]) > now:
                 return enrollment["tenantId"]
         except (KeyError, ValueError):
             continue
     return None
+
+
+def ingest_tenant(supplied_token: str) -> str | None:
+    if hmac.compare_digest(supplied_token, TOKEN):
+        return "synova"
+    digest = hashlib.sha256(supplied_token.encode()).hexdigest()
+    config = load_config()
+    for agent in config.get("agentTokens", []):
+        if agent.get("enabled", True) and hmac.compare_digest(digest, str(agent.get("tokenHash", ""))):
+            return agent.get("tenantId")
+    # Compatibility for agents installed before durable device credentials.
+    return enrollment_tenant(supplied_token, config)
 
 
 def bounds(params: dict) -> tuple[datetime, datetime, str]:
@@ -1730,14 +1742,9 @@ class Handler(BaseHTTPRequestHandler):
     def read_json(self) -> dict:
         length = int(self.headers.get("Content-Length", "0")); return json.loads(self.rfile.read(length)) if 0 < length <= 1024 * 1024 else {}
 
-    def serve_windows_enrollment_package(self, token: str) -> None:
-        """Deliver the current MSI plus a short-lived, tenant-bound launcher.
-
-        An MSI cannot receive tenant properties from a normal browser download.
-        The launcher invokes msiexec with the one-time enrollment properties and
-        starts the user-session collector immediately after installation.
-        """
-        tenant_id = ingest_tenant(token)
+    def serve_windows_enrollment_package(self, token: str, single_file: bool = False) -> None:
+        """Deliver an elevated tenant-bound launcher for the current MSI."""
+        tenant_id = enrollment_tenant(token)
         if not tenant_id:
             return self.send_json(401, {"error": "invalid_or_expired_enrollment"})
         if not WINDOWS_MSI_FILE.is_file():
@@ -1745,28 +1752,68 @@ class Handler(BaseHTTPRequestHandler):
         server_url = PUBLIC_URL.replace('"', '')
         safe_tenant = re.sub(r"[^a-z0-9-]", "", tenant_id.lower())
         safe_token = re.sub(r"[^A-Za-z0-9_-]", "", token)
+        msi_sha = hashlib.sha256(WINDOWS_MSI_FILE.read_bytes()).hexdigest()
+        if single_file:
+            source = (
+                f'set "MSI=%TEMP%\\TimeWatcher-Windows-{msi_sha[:12]}.msi"\r\n'
+                'echo Baixando o agente oficial...\r\n'
+                f'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference=\'SilentlyContinue\'; Invoke-WebRequest -Uri \'{server_url}/downloads/TimeWatcher-Windows.msi\' -OutFile \'%MSI%\'"\r\n'
+            )
+        else:
+            source = 'set "MSI=%~dp0TimeWatcher-Windows.msi"\r\n'
         launcher = f'''@echo off
 setlocal
-set "MSI=%~dp0TimeWatcher-Windows.msi"
-if not exist "%MSI%" (
-  echo Arquivo TimeWatcher-Windows.msi nao encontrado.
+net session >nul 2>&1
+if not "%ERRORLEVEL%"=="0" (
+  echo Solicitando permissao de administrador...
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+  exit /b
+)
+{source}if not exist "%MSI%" (
+  echo Nao foi possivel obter o instalador do TimeWatcher.
   pause
   exit /b 1
 )
+for /f "delims=" %%H in ('powershell.exe -NoProfile -Command "(Get-FileHash -Algorithm SHA256 -Path '%MSI%').Hash.ToLowerInvariant()"') do set "ACTUAL_SHA=%%H"
+if /I not "%ACTUAL_SHA%"=="{msi_sha}" (
+  echo Falha de integridade do instalador. O arquivo nao sera executado.
+  del "%MSI%" >nul 2>&1
+  pause
+  exit /b 2
+)
 echo Instalando o agente TimeWatcher...
-msiexec.exe /i "%MSI%" SERVER_URL="{server_url}" TENANT_ID="{safe_tenant}" ENROLLMENT_TOKEN="{safe_token}" /passive /norestart
+if not exist "%ProgramData%\\TimeWatcher" mkdir "%ProgramData%\\TimeWatcher"
+msiexec.exe /i "%MSI%" SERVER_URL="{server_url}" TENANT_ID="{safe_tenant}" ENROLLMENT_TOKEN="{safe_token}" /passive /norestart /L*v "%ProgramData%\\TimeWatcher\\installer.log"
 set "RESULT=%ERRORLEVEL%"
 if not "%RESULT%"=="0" if not "%RESULT%"=="3010" (
   echo A instalacao falhou. Codigo: %RESULT%
-  echo Consulte C:\\ProgramData\\TimeWatcher\\agent.log e envie-o ao suporte.
+  echo Consulte C:\\ProgramData\\TimeWatcher\\installer.log e envie-o ao suporte.
   pause
   exit /b %RESULT%
 )
 start "" /b powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\\Program Files\\TimeWatcher\\TimeWatcherAgent.ps1"
-echo Instalacao concluida. O TimeWatcher iniciou a coleta; o primeiro sinal pode levar ate 1 minuto.
-timeout /t 5 >nul
+echo Validando a primeira sincronizacao...
+timeout /t 15 >nul
+findstr /C:"Heartbeat enviado" "%ProgramData%\\TimeWatcher\\agent.log" >nul 2>&1
+if "%ERRORLEVEL%"=="0" (
+  echo TimeWatcher instalado e conectado com sucesso.
+) else (
+  echo TimeWatcher instalado. A sincronizacao continuara automaticamente em segundo plano.
+  echo Diagnostico: C:\\ProgramData\\TimeWatcher\\agent.log
+)
+timeout /t 4 >nul
 exit /b 0
 '''
+        if single_file:
+            body = launcher.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", 'attachment; filename="Instalar-TimeWatcher-Windows.cmd"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.write(WINDOWS_MSI_FILE, "TimeWatcher-Windows.msi")
@@ -1858,7 +1905,7 @@ exit /b 0
                 save_config(config)
             return self.send_json(200, result)
         if parsed.path == "/dashboard/enrollments/windows":
-            return self.serve_windows_enrollment_package(str(params.get("token", [""])[0]))
+            return self.serve_windows_enrollment_package(str(params.get("token", [""])[0]), params.get("format", [""])[0] == "cmd")
         if parsed.path.startswith("/dashboard/") and not current: return self.send_json(401, {"error": "unauthenticated"})
         if current and current["role"] in ("member", "employee") and (parsed.path.startswith("/dashboard/screenshots") or parsed.path in ("/dashboard/teams", "/dashboard/alerts", "/dashboard/billing", "/dashboard/policies", "/dashboard/audit", "/dashboard/digests", "/dashboard/trends", "/dashboard/intelligence", "/dashboard/invites")):
             return self.send_json(403, {"error": "forbidden"})
@@ -1984,6 +2031,25 @@ exit /b 0
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlsplit(self.path); current = viewer(self.headers)
+        if parsed.path == "/v1/agent-enroll":
+            supplied = self.headers.get("Authorization", "")
+            enrollment_token = supplied[7:] if supplied.startswith("Bearer ") else ""
+            try: payload = self.read_json()
+            except Exception: return self.send_json(400, {"error": "invalid_json"})
+            hostname = canonical_host(str(payload.get("host", ""))[:200])
+            platform_name = agent_platform(payload.get("platform"))
+            with _CONFIG_LOCK:
+                config = load_config(); tenant_id = enrollment_tenant(enrollment_token, config)
+                if not tenant_id: return self.send_json(401, {"error": "invalid_or_expired_enrollment"})
+                if not hostname or platform_name not in ("macos", "windows"): return self.send_json(400, {"error": "host_platform_required"})
+                agent_token = secrets.token_urlsafe(48); digest = hashlib.sha256(agent_token.encode()).hexdigest(); now = datetime.now(timezone.utc).isoformat()
+                for existing in config.setdefault("agentTokens", []):
+                    if existing.get("tenantId") == tenant_id and canonical_host(str(existing.get("host", ""))) == hostname:
+                        existing["enabled"] = False; existing["revokedAt"] = now
+                config["agentTokens"].append({"id": str(uuid.uuid4()), "tenantId": tenant_id, "host": hostname, "platform": platform_name, "tokenHash": digest, "createdAt": now, "enabled": True})
+                save_config(config)
+            audit("agent.enroll", "installer", {"tenant": tenant_id, "host": hostname, "platform": platform_name})
+            return self.send_json(201, {"agentToken": agent_token, "tenantId": tenant_id, "host": hostname})
         if parsed.path == "/internal/agent-release":
             supplied = self.headers.get("Authorization", "")
             if not supplied.startswith("Bearer ") or not hmac.compare_digest(supplied[7:], TOKEN): return self.send_json(401, {"error": "unauthorized"})
