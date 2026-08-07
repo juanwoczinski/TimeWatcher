@@ -1757,7 +1757,7 @@ class Handler(BaseHTTPRequestHandler):
             source = (
                 f'set "MSI=%TEMP%\\TimeWatcher-Windows-{msi_sha[:12]}.msi"\r\n'
                 'echo Baixando o agente oficial...\r\n'
-                f'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference=\'SilentlyContinue\'; Invoke-WebRequest -Uri \'{server_url}/downloads/TimeWatcher-Windows.msi\' -OutFile \'%MSI%\'"\r\n'
+                f'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference=\'SilentlyContinue\'; Invoke-WebRequest -Uri \'{server_url}/downloads/TimeWatcher-Windows.msi?v={msi_sha[:12]}\' -OutFile \'%MSI%\'"\r\n'
             )
         else:
             source = 'set "MSI=%~dp0TimeWatcher-Windows.msi"\r\n'
