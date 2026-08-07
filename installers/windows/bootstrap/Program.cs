@@ -69,6 +69,7 @@ internal static class Program
 
             var agentScript = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "TimeWatcher", "TimeWatcherAgent.ps1");
             if (!File.Exists(agentScript)) throw new FileNotFoundException("O agente não foi instalado corretamente.", agentScript);
+            StopExistingAgent();
             Process.Start(new ProcessStartInfo("powershell.exe")
             {
                 UseShellExecute = false,
@@ -116,6 +117,28 @@ internal static class Program
     {
         using var identity = WindowsIdentity.GetCurrent();
         return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    private static void StopExistingAgent()
+    {
+        // A previous agent may still own the global mutex after an in-place
+        // upgrade. Stop only PowerShell processes running our installed script;
+        // never terminate unrelated PowerShell sessions.
+        const string command = "Get-CimInstance Win32_Process -Filter \"Name='powershell.exe' OR Name='pwsh.exe'\" | Where-Object { $_.CommandLine -like '*TimeWatcherAgent.ps1*' -and $_.ProcessId -ne $PID } | ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName Terminate | Out-Null }";
+        try
+        {
+            using var stop = Process.Start(new ProcessStartInfo("powershell.exe")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+                Arguments = $"-NoProfile -ExecutionPolicy Bypass -Command \"{command.Replace("\"", "\\\"")}\""
+            });
+            stop?.WaitForExit(15_000);
+            Thread.Sleep(1_000);
+            Log("Instâncias anteriores do agente encerradas.");
+        }
+        catch (Exception error) { Log($"Não foi possível encerrar a instância anterior: {error.Message}"); }
     }
 
     private static void Log(string message)
